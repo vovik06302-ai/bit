@@ -651,7 +651,8 @@ export default function App() {
   };
 
   const handleDownloadBat = () => {
-    const blob = new Blob([generatedBatContent], { type: 'text/plain;charset=utf-8' });
+    const crlfContent = generatedBatContent.replace(/\r?\n/g, '\r\n');
+    const blob = new Blob([crlfContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -664,8 +665,8 @@ export default function App() {
     addWatchdogEvent(
       'PROCESS',
       'info',
-      'Выгружена программа pearl_watchdog_agent.bat (с окном управления, кнопкой Запуска и ярлыком на Рабочем столе)',
-      'Запусти файл на ПК — откроется окно с кнопкой «▶ ЗАПУСТИТЬ МАЙНИНГ» и создастся иконка на Рабочем столе.'
+      'Выгружена программа pearl_watchdog_agent.bat v2.5 (1185×855 со спидометрами, заработком и счётчиком света)',
+      'Запусти скачанный файл на ПК — откроется обновлённое окно со стрелочными спидометрами и ярлыком на Рабочем столе.'
     );
   };
 
@@ -676,7 +677,11 @@ export default function App() {
       workflow: 'build-installer.yml',
       json: 'rig-config.json',
     };
-    const blob = new Blob([activePreviewContent], { type: 'text/plain;charset=utf-8' });
+    const outText =
+      previewFile === 'bat' || previewFile === 'iss'
+        ? activePreviewContent.replace(/\r?\n/g, '\r\n')
+        : activePreviewContent;
+    const blob = new Blob([outText], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1240,7 +1245,16 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            onClick={handleDownloadBat}
+            className="px-3.5 py-2 text-xs font-bold text-cyan-300 bg-cyan-500/15 border border-cyan-500/40 rounded-lg hover:bg-cyan-500/25 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer shadow-sm"
+            title="Скачать обновлённую программу v2.5 для Windows со стрелочными спидометрами, заработком и счётчиком света"
+          >
+            <Download className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Скачать новую версию для ПК v2.5 (.BAT)</span>
+          </button>
+
           <button
             onClick={() => {
               setDraftWalletAddress(rigConfig.walletAddress);
@@ -1249,7 +1263,7 @@ export default function App() {
             className="px-3.5 py-2 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
           >
             <Wallet className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Изменить / добавить кошелёк</span>
+            <span>Изменить кошелёк</span>
           </button>
 
           <button

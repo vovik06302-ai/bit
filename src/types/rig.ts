@@ -43,6 +43,10 @@ export interface WatchdogPolicy {
   autoBypassVpnTun: boolean;
   fixHostsFakeIp: boolean;
   autoElevateAdmin: boolean;
+  autoHealCrashes?: boolean;
+  autoResetGpuDriver?: boolean;
+  autoStepDownOcOnCrash?: boolean;
+  autoSwitchBackupPool?: boolean;
   telegramEnabled: boolean;
   telegramBotToken: string;
   telegramChatId: string;
@@ -55,19 +59,35 @@ export interface GpuLiveMetrics {
   hashrateMHs: number;
   acceptedShares: number;
   rejectedShares: number;
+  staleShares: number;
+  lastShareSec: number;
   tempC: number;
+  hotspotTempC: number;
+  vramTempC: number;
   fanPercent: number;
+  fanRpm: number;
   powerWatts: number;
   efficiencyHW: number;
   cclkMHz: number;
   mclkMHz: number;
+  voltageMv: number;
+  vramUsedMb: number;
+  pState: string;
+  pcieLink: string;
   status: 'nominal' | 'warning' | 'critical' | 'offline';
 }
 
 export interface WatchdogEvent {
-  id: string;
+  id: number | string;
   timestamp: string;
-  category: 'VPN_BYPASS' | 'PROCESS' | 'THERMAL' | 'TELEGRAM' | 'OC_PROFILE' | 'GITHUB_OTA';
+  category:
+    | 'AUTO_HEAL'
+    | 'VPN_BYPASS'
+    | 'PROCESS'
+    | 'THERMAL'
+    | 'TELEGRAM'
+    | 'OC_PROFILE'
+    | 'GITHUB_OTA';
   severity: 'info' | 'warning' | 'error';
   message: string;
   actionTaken: string;

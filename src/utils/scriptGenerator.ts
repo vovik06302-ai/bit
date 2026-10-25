@@ -647,6 +647,51 @@ function Update-WalletAddress([string]$NewWallet) {
     }
 }
 
+function Invoke-AutoHealAndRestart([string]$Reason) {
+    $script:RestartCount++
+    Write-AgentLog "HEAL" "АВАРИЯ ОБНАРУЖЕНА ($Reason). Запуск автоисправления #$RestartCount..."
+
+    # 1. Читаем последние строки лога для точной диагностики причины сбоя
+    $tailText = ""
+    if (Test-Path $LogFile) {
+        try {
+            $tailText = (Get-Content -LiteralPath $LogFile -Tail 35 -ErrorAction SilentlyContinue) -join "\`n"
+        } catch {}
+    }
+
+    # 2. Автоисправление сетевой блокировки VPN / TUN / Fake-IP / тайм-аута пула
+    if ($tailText -match "timed out|Failed to connect|SOCKS5|Connection refused") {
+        Write-AgentLog "HEAL" "Диагноз: Блокировка пула через VPN TUN. Пересборка /32 маршрутов и DNS..."
+        ipconfig /flushdns >$null 2>&1
+        Repair-VpnBypassRoutes
+    }
+
+    # 3. Автоисправление прав разгона NVIDIA (принудительный сброс и фиксация через nvidia-smi)
+    if ($tailText -match "permission to perform this operation") {
+        Write-AgentLog "HEAL" "Диагноз: Сбой применения частот. Принудительная фиксация через nvidia-smi..."
+        $plArr = $CurrentPL -split ","
+        $cclkArr = $CurrentCClk -split ","
+        nvidia-smi -i 0 -pl $plArr[0] >$null 2>&1
+        nvidia-smi -i 1 -pl $plArr[1] >$null 2>&1
+        nvidia-smi -i 0 -lgc "$($cclkArr[0]),$($cclkArr[0])" >$null 2>&1
+        nvidia-smi -i 1 -lgc "$($cclkArr[1]),$($cclkArr[1])" >$null 2>&1
+    }
+
+    # 4. Автоисправление вылета CUDA / зависания видеокарты (мягкий сброс частот и снижение разгона на -30 MHz при повторных сбоях)
+    if ($tailText -match "CUDA|illegal memory|GPU is lost|unspecified launch failure" -or $script:RestartCount -ge 3) {
+        Write-AgentLog "HEAL" "Диагноз: Сбой драйвера CUDA. Мягкий сброс GPU и авто-коррекция частот (-30 MHz)..."
+        nvidia-smi -rgc >$null 2>&1
+        $cParts = $CurrentCClk -split ","
+        $c0 = [Math]::Max(2100, ([int]$cParts[0] - 30))
+        $c1 = [Math]::Max(2100, ([int]$cParts[1] - 30))
+        $script:CurrentCClk = "$c0,$c1"
+        Write-AgentLog "HEAL" "Установлен безопасный профиль ядра: $script:CurrentCClk MHz"
+    }
+
+    Send-TelegramAlert "⚡ Автоисправление аварии #$RestartCount ($Reason). Выполнена диагностика, сброс маршрутов/GPU и перезапуск майнинга."
+    Start-MinerProcess
+}
+
 # Локальный HTTP-мост (127.0.0.1:3002), чтобы кнопки в браузере управляли ПК напрямую
 $httpListener = New-Object System.Net.HttpListener
 $httpListener.Prefixes.Add("http://127.0.0.1:$BridgePort/")
@@ -696,6 +741,8 @@ $timer.Add_Tick({
                 Stop-MinerProcess
             } elseif ($path -eq "/vpn_fix") {
                 Repair-VpnBypassRoutes
+            } elseif ($path -eq "/auto_heal") {
+                Invoke-AutoHealAndRestart "Ручной вызов автоисправления из панели"
             } elseif ($path -eq "/set_wallet") {
                 $newW = $req.QueryString["wallet"]
                 if ($newW) {
@@ -704,7 +751,7 @@ $timer.Add_Tick({
             }
 
             $procNow = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue
-            $statusJson = @{ ok = $true; mining = ($null -ne $procNow); worker = $Worker; wallet = $Wallet; cclk = $CurrentCClk; pl = $CurrentPL } | ConvertTo-Json
+            $statusJson = @{ ok = $true; mining = ($null -ne $procNow); worker = $Worker; wallet = $Wallet; cclk = $CurrentCClk; pl = $CurrentPL; restarts = $RestartCount } | ConvertTo-Json
             $buf = [System.Text.Encoding]::UTF8.GetBytes($statusJson)
             $res.ContentType = "application/json"
             $res.ContentLength64 = $buf.Length
@@ -717,11 +764,41 @@ $timer.Add_Tick({
     if ($script:tickSec -ge $CheckInterval) {
         $script:tickSec = 0
         if ($MiningDesired) {
+            # 1. Проверка: не упал ли процесс onezerominer.exe
             $proc = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue
             if (-not $proc) {
-                $script:RestartCount++
-                Write-AgentLog "ERR" "Процесс майнера закрылся! Автоперезапуск #$RestartCount..."
-                Start-MinerProcess
+                Invoke-AutoHealAndRestart "Процесс onezerominer.exe аварийно закрылся"
+            } else {
+                # 2. Проверка лога на 0.00 H/s или тайм-аут пула
+                if (Test-Path $LogFile) {
+                    $recentLines = (Get-Content -LiteralPath $LogFile -Tail 12 -ErrorAction SilentlyContinue) -join "\`n"
+                    if ($recentLines -match "0\\.00 H/s" -or $recentLines -match "Failed to connect to pool") {
+                        $script:ZeroHashCounter += $CheckInterval
+                        Write-AgentLog "WARN" "Нулевой хешрейт / ошибка пула ($script:ZeroHashCounter из $ZeroHashLimitSec сек)..."
+                        if ($script:ZeroHashCounter -ge $ZeroHashLimitSec) {
+                            $script:ZeroHashCounter = 0
+                            Invoke-AutoHealAndRestart "Зависание 0.00 H/s или потеря связи с пулом"
+                        }
+                    } else {
+                        $script:ZeroHashCounter = 0
+                    }
+                }
+
+                # 3. Проверка температуры GPU через nvidia-smi и автозащита от перегрева
+                try {
+                    $smiCsv = nvidia-smi --query-gpu=index,temperature.gpu,power.draw --format=csv,noheader,nounits 2>$null
+                    foreach ($line in $smiCsv) {
+                        $p = $line -split ","
+                        if ($p.Count -ge 2) {
+                            $gIdx = $p[0].Trim()
+                            $gTemp = [int]$p[1].Trim()
+                            if ($gTemp -ge $MaxTemp) {
+                                Write-AgentLog "HEAL" "Перегрев GPU $gIdx ($gTemp C >= $MaxTemp C)! Автоснижение PL до $EmergencyPL W..."
+                                nvidia-smi -i $gIdx -pl $EmergencyPL >$null 2>&1
+                            }
+                        }
+                    }
+                } catch {}
             }
         }
 

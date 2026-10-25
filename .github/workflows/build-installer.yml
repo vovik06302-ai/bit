@@ -1,0 +1,76 @@
+name: Build Pearl Rig Installer (.EXE)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  release:
+    types: [ published, created, prereleased, edited ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Pearl Desktop Icon (pearl-icon.ico)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $bmp = New-Object System.Drawing.Bitmap(64, 64)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+          $bgBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 11, 15, 23))
+          $g.FillEllipse($bgBrush, 2, 2, 60, 60)
+          $ringPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(255, 16, 185, 129), 4)
+          $g.DrawEllipse($ringPen, 6, 6, 52, 52)
+          $pearlBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 52, 211, 153))
+          $g.FillEllipse($pearlBrush, 20, 20, 24, 24)
+          $g.Dispose()
+          $hIcon = $bmp.GetHicon()
+          $icon = [System.Drawing.Icon]::FromHandle($hIcon)
+          $fs = New-Object System.IO.FileStream("pearl-icon.ico", [System.IO.FileMode]::Create)
+          $icon.Save($fs)
+          $fs.Close()
+          $bmp.Dispose()
+
+      - name: Prepare UTF-8 BOM for Inno Setup and Compile PearlRigControl-Setup.exe
+        shell: pwsh
+        run: |
+          $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+          $issContent = Get-Content -LiteralPath "installer.iss" -Raw -Encoding UTF8
+          [System.IO.File]::WriteAllText((Join-Path $PWD "installer.iss"), $issContent, $utf8Bom)
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y
+          }
+          & $iscc "installer.iss"
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PearlRigControl-Setup
+          path: Output/PearlRigControl-Setup.exe
+
+      - name: Attach PearlRigControl-Setup.exe to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || format('v1.0.{0}', github.run_number) }}
+          name: ${{ github.event.release.name || format('Pearl Rig Control Installer v1.0.{0}', github.run_number) }}
+          prerelease: false
+          body: |
+            ### Установщик программы Pearl Rig Control (Dual RTX 4070 Ti)
+            1. Скачай и запусти **PearlRigControl-Setup.exe** из блока **Assets** ниже.
+            2. После установки на **Рабочем столе** появится иконка **Pearl Rig Control**.
+            3. В окне программы нажми кнопку **«▶ ЗАПУСТИТЬ МАЙНИНГ»** (программа сама настроит обход INCY VPN и разгон RTX 4070 Ti).
+          files: |
+            Output/PearlRigControl-Setup.exe
+            pearl_watchdog_agent.bat
+            rig-config.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

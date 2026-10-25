@@ -126,7 +126,7 @@ export function buildRemoteRigConfigJson(config: RigConfig, policy: WatchdogPoli
 }
 
 export function generateInnoSetupScript(config: RigConfig): string {
-  return `; Скрипт сборки установщика PearlRigControl-Setup.exe (Inno Setup 6)
+  return `; Inno Setup 6 Script for PearlRigControl-Setup.exe
 [Setup]
 AppId={{8F9C2E41-5A7D-4E3B-9C12-7D8E4A2F6B90}
 AppName=Pearl Rig Control (${config.workerName})
@@ -143,10 +143,7 @@ PrivilegesRequired=admin
 WizardStyle=modern
 
 [Languages]
-Name: "russian"; MessagesFile: "compiler:Languages\\Russian.isl"
-
-[Tasks]
-Name: "desktopicon"; Description: "Создать ярлык «Pearl Rig Control» на Рабочем столе"; GroupDescription: "Значки на Рабочем столе:"
+Name: "default"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "pearl_watchdog_agent.bat"; DestDir: "{app}"; Flags: ignoreversion
@@ -155,12 +152,12 @@ Source: "pearl-icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Иконка на Рабочем столе (создаётся автоматически при установке)
-Name: "{autodesktop}\\Pearl Rig Control"; Filename: "{app}\\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\\pearl-icon.ico"; Comment: "Программа управления и запуска майнинга Pearl (${config.workerName})"
+Name: "{autodesktop}\\Pearl Rig Control"; Filename: "{app}\\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\\pearl-icon.ico"; Comment: "Pearl Rig Control & Mining Launcher (${config.workerName})"
 ; Иконка в меню Пуск
-Name: "{group}\\Pearl Rig Control"; Filename: "{app}\\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\\pearl-icon.ico"
+Name: "{group}\\Pearl Rig Control"; Filename: "{app}\\pearl_watchdog_agent.bat"; WorkingDir: "{app}\\pearl-icon.ico"
 
 [Run]
-Filename: "{app}\\pearl_watchdog_agent.bat"; Description: "Открыть программу Pearl Rig Control после установки"; Flags: nowait postinstall skipifsilent shellexec
+Filename: "{app}\\pearl_watchdog_agent.bat"; Description: "Launch Pearl Rig Control"; Flags: nowait postinstall skipifsilent shellexec
 `;
 }
 
@@ -170,6 +167,8 @@ export function generateGitHubWorkflowYaml(): string {
 on:
   push:
     branches: [ "main", "master" ]
+  release:
+    types: [ published, created, prereleased, edited ]
   workflow_dispatch:
 
 permissions:
@@ -203,14 +202,18 @@ jobs:
           $fs.Close()
           $bmp.Dispose()
 
-      - name: Compile PearlRigControl-Setup.exe with Inno Setup
+      - name: Prepare UTF-8 BOM for Inno Setup and Compile PearlRigControl-Setup.exe
         shell: pwsh
         run: |
+          $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+          $issContent = Get-Content -LiteralPath "installer.iss" -Raw -Encoding UTF8
+          [System.IO.File]::WriteAllText((Join-Path $PWD "installer.iss"), $issContent, $utf8Bom)
+
           $iscc = "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe"
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y
           }
-          & $iscc installer.iss
+          & $iscc "installer.iss"
 
       - name: Upload Installer Artifact
         uses: actions/upload-artifact@v4
@@ -218,20 +221,23 @@ jobs:
           name: PearlRigControl-Setup
           path: Output/PearlRigControl-Setup.exe
 
-      - name: Publish Release to GitHub Releases
+      - name: Attach PearlRigControl-Setup.exe to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.\${{ github.run_number }}
-          name: "Pearl Rig Control Installer v1.0.\${{ github.run_number }}"
+          tag_name: \${{ github.event.release.tag_name || format('v1.0.{0}', github.run_number) }}
+          name: \${{ github.event.release.name || format('Pearl Rig Control Installer v1.0.{0}', github.run_number) }}
+          prerelease: false
           body: |
             ### Установщик программы Pearl Rig Control (Dual RTX 4070 Ti)
-            1. Скачай и запусти **PearlRigControl-Setup.exe**.
-            2. На **Рабочем столе** появится иконка **Pearl Rig Control**.
-            3. В программе есть кнопка **«ЗАПУСТИТЬ МАЙНИНГ» / «ОСТАНОВИТЬ МАЙНИНГ»**, а также мост к веб-панели и автообновление через GitHub (OTA).
+            1. Скачай и запусти **PearlRigControl-Setup.exe** из блока **Assets** ниже.
+            2. После установки на **Рабочем столе** появится иконка **Pearl Rig Control**.
+            3. В окне программы нажми кнопку **«▶ ЗАПУСТИТЬ МАЙНИНГ»**.
           files: |
             Output/PearlRigControl-Setup.exe
             pearl_watchdog_agent.bat
             rig-config.json
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 `;
 }
 
@@ -327,7 +333,7 @@ $LastConfigSignature = "$MiningDesired|$Wallet|$Worker|$Pool1|$Pool2|$CurrentCCl
 # ============================================================================
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Pearl Rig Control [$Worker] - Dual RTX 4070 Ti"
-$form.Size = New-Object System.Drawing.Size(680, 520)
+$form.Size = New-Object System.Drawing.Size(680, 565)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
 $form.ForeColor = [System.Drawing.Color]::FromArgb(241, 245, 249)
@@ -355,8 +361,8 @@ $btnStart.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.
 $btnStart.BackColor = [System.Drawing.Color]::FromArgb(16, 185, 129)
 $btnStart.ForeColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
 $btnStart.FlatStyle = "Flat"
-$btnStart.Location = New-Object System.Drawing.Point(20, 82)
-$btnStart.Size = New-Object System.Drawing.Size(210, 44)
+$btnStart.Location = New-Object System.Drawing.Point(20, 78)
+$btnStart.Size = New-Object System.Drawing.Size(210, 42)
 $form.Controls.Add($btnStart)
 
 $btnStop = New-Object System.Windows.Forms.Button
@@ -365,8 +371,8 @@ $btnStop.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.F
 $btnStop.BackColor = [System.Drawing.Color]::FromArgb(239, 68, 68)
 $btnStop.ForeColor = [System.Drawing.Color]::White
 $btnStop.FlatStyle = "Flat"
-$btnStop.Location = New-Object System.Drawing.Point(240, 82)
-$btnStop.Size = New-Object System.Drawing.Size(145, 44)
+$btnStop.Location = New-Object System.Drawing.Point(240, 78)
+$btnStop.Size = New-Object System.Drawing.Size(145, 42)
 $form.Controls.Add($btnStop)
 
 $btnVpn = New-Object System.Windows.Forms.Button
@@ -375,8 +381,8 @@ $btnVpn.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $btnVpn.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
 $btnVpn.ForeColor = [System.Drawing.Color]::White
 $btnVpn.FlatStyle = "Flat"
-$btnVpn.Location = New-Object System.Drawing.Point(395, 82)
-$btnVpn.Size = New-Object System.Drawing.Size(120, 44)
+$btnVpn.Location = New-Object System.Drawing.Point(395, 78)
+$btnVpn.Size = New-Object System.Drawing.Size(120, 42)
 $form.Controls.Add($btnVpn)
 
 $btnGit = New-Object System.Windows.Forms.Button
@@ -385,9 +391,36 @@ $btnGit.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $btnGit.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
 $btnGit.ForeColor = [System.Drawing.Color]::White
 $btnGit.FlatStyle = "Flat"
-$btnGit.Location = New-Object System.Drawing.Point(525, 82)
-$btnGit.Size = New-Object System.Drawing.Size(120, 44)
+$btnGit.Location = New-Object System.Drawing.Point(525, 78)
+$btnGit.Size = New-Object System.Drawing.Size(120, 42)
 $form.Controls.Add($btnGit)
+
+$lblWallet = New-Object System.Windows.Forms.Label
+$lblWallet.Text = "Адрес кошелька Pearl (-w):"
+$lblWallet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5)
+$lblWallet.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+$lblWallet.Location = New-Object System.Drawing.Point(20, 128)
+$lblWallet.Size = New-Object System.Drawing.Size(260, 16)
+$form.Controls.Add($lblWallet)
+
+$txtWallet = New-Object System.Windows.Forms.TextBox
+$txtWallet.Text = $Wallet
+$txtWallet.BackColor = [System.Drawing.Color]::FromArgb(15, 23, 42)
+$txtWallet.ForeColor = [System.Drawing.Color]::FromArgb(241, 245, 249)
+$txtWallet.Font = New-Object System.Drawing.Font("Consolas", 9.5)
+$txtWallet.Location = New-Object System.Drawing.Point(20, 146)
+$txtWallet.Size = New-Object System.Drawing.Size(445, 28)
+$form.Controls.Add($txtWallet)
+
+$btnSaveWallet = New-Object System.Windows.Forms.Button
+$btnSaveWallet.Text = "💾 ИЗМЕНИТЬ КОШЕЛЁК"
+$btnSaveWallet.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$btnSaveWallet.BackColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+$btnSaveWallet.ForeColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
+$btnSaveWallet.FlatStyle = "Flat"
+$btnSaveWallet.Location = New-Object System.Drawing.Point(475, 143)
+$btnSaveWallet.Size = New-Object System.Drawing.Size(170, 30)
+$form.Controls.Add($btnSaveWallet)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true
@@ -396,7 +429,7 @@ $txtLog.ScrollBars = "Vertical"
 $txtLog.BackColor = [System.Drawing.Color]::FromArgb(7, 10, 16)
 $txtLog.ForeColor = [System.Drawing.Color]::FromArgb(203, 213, 225)
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$txtLog.Location = New-Object System.Drawing.Point(20, 140)
+$txtLog.Location = New-Object System.Drawing.Point(20, 184)
 $txtLog.Size = New-Object System.Drawing.Size(625, 320)
 $form.Controls.Add($txtLog)
 
@@ -601,7 +634,20 @@ function Sync-FromGitHub([bool]$ForceLog = $false) {
     }
 }
 
-# Локальный HTTP-мост (127.0.0.1:3002), чтобы кнопка «Запустить майнинг» в браузере управляла ПК напрямую
+function Update-WalletAddress([string]$NewWallet) {
+    $clean = $NewWallet.Trim()
+    if ([string]::IsNullOrWhiteSpace($clean)) { return }
+    $script:Wallet = $clean
+    if ($txtWallet -and -not $txtWallet.IsDisposed) {
+        $txtWallet.Text = $clean
+    }
+    Write-AgentLog "OK" "Адрес кошелька изменён на: $clean (длина: $($clean.Length) симв.)"
+    if ($script:MiningDesired) {
+        Start-MinerProcess
+    }
+}
+
+# Локальный HTTP-мост (127.0.0.1:3002), чтобы кнопки в браузере управляли ПК напрямую
 $httpListener = New-Object System.Net.HttpListener
 $httpListener.Prefixes.Add("http://127.0.0.1:$BridgePort/")
 try {
@@ -613,6 +659,7 @@ $btnStart.Add_Click({ Start-MinerProcess })
 $btnStop.Add_Click({ Stop-MinerProcess })
 $btnVpn.Add_Click({ Repair-VpnBypassRoutes })
 $btnGit.Add_Click({ Sync-FromGitHub -ForceLog $true })
+$btnSaveWallet.Add_Click({ Update-WalletAddress $txtWallet.Text })
 
 Ensure-DesktopShortcut
 
@@ -649,10 +696,15 @@ $timer.Add_Tick({
                 Stop-MinerProcess
             } elseif ($path -eq "/vpn_fix") {
                 Repair-VpnBypassRoutes
+            } elseif ($path -eq "/set_wallet") {
+                $newW = $req.QueryString["wallet"]
+                if ($newW) {
+                    Update-WalletAddress $newW
+                }
             }
 
             $procNow = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue
-            $statusJson = @{ ok = $true; mining = ($null -ne $procNow); worker = $Worker; cclk = $CurrentCClk; pl = $CurrentPL } | ConvertTo-Json
+            $statusJson = @{ ok = $true; mining = ($null -ne $procNow); worker = $Worker; wallet = $Wallet; cclk = $CurrentCClk; pl = $CurrentPL } | ConvertTo-Json
             $buf = [System.Text.Encoding]::UTF8.GetBytes($statusJson)
             $res.ContentType = "application/json"
             $res.ContentLength64 = $buf.Length

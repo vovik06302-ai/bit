@@ -23,6 +23,8 @@ import {
   Wallet,
   Plus,
   Trash2,
+  Zap,
+  TrendingUp,
 } from 'lucide-react';
 import {
   RigConfig,
@@ -225,6 +227,15 @@ export default function App() {
   const [localBridgeConnected, setLocalBridgeConnected] = useState<boolean>(false);
   const [vpnBypassState, setVpnBypassState] = useState<'active' | 'rerouting'>('active');
   const [uptimeSeconds, setUptimeSeconds] = useState<number>(5142);
+
+  // Реальное время: тариф электроэнергии, курс PRL и живые счётчики кВт·ч и заработка
+  const [electricityTariffRub, setElectricityTariffRub] = useState<number>(5.5);
+  const [prlPriceUsd, setPrlPriceUsd] = useState<number>(0.045);
+  const [usdToRub, setUsdToRub] = useState<number>(96.5);
+  const [prlPer100MhDay, setPrlPer100MhDay] = useState<number>(28.5);
+  const [systemOverheadWatts] = useState<number>(48); // Тушка ПК (Мат. плата + CPU + БП)
+  const [sessionKwhUsed, setSessionKwhUsed] = useState<number>(0.4892);
+  const [sessionPrlMined, setSessionPrlMined] = useState<number>(8.9425);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [rawLogInput, setRawLogInput] = useState<string>(INITIAL_SAMPLE_LOG);
@@ -448,6 +459,51 @@ export default function App() {
   const totalPower = Number(
     (gpuMetrics[0].powerWatts + gpuMetrics[1].powerWatts).toFixed(1)
   );
+  // Полное потребление из розетки (видеокарты + тушка ПК / КПД БП)
+  const totalWallWatts = Number(
+    (totalPower + (rigConfig.miningActive ? systemOverheadWatts : 28)).toFixed(1)
+  );
+  const totalWallKw = totalWallWatts / 1000;
+
+  // Расчёт дохода и расхода электроэнергии в реальном времени
+  const prlPerDay = (totalHashrate / 100) * prlPer100MhDay;
+  const prlPerHour = prlPerDay / 24;
+  const prlPerMonth = prlPerDay * 30;
+
+  const grossUsdDay = prlPerDay * prlPriceUsd;
+  const grossRubDay = grossUsdDay * usdToRub;
+  const grossRubHour = grossRubDay / 24;
+  const grossRubMonth = grossRubDay * 30;
+  const grossUsdMonth = grossUsdDay * 30;
+
+  const kwhPerDay = totalWallKw * 24;
+  const kwhPerMonth = kwhPerDay * 30;
+  const powerCostRubHour = totalWallKw * electricityTariffRub;
+  const powerCostRubDay = kwhPerDay * electricityTariffRub;
+  const powerCostRubMonth = kwhPerMonth * electricityTariffRub;
+  const powerCostUsdDay = usdToRub > 0 ? powerCostRubDay / usdToRub : 0;
+
+  const netProfitRubDay = grossRubDay - powerCostRubDay;
+  const netProfitUsdDay = grossUsdDay - powerCostUsdDay;
+  const netProfitRubMonth = grossRubMonth - powerCostRubMonth;
+
+  const sessionCostRub = sessionKwhUsed * electricityTariffRub;
+  const sessionEarnedUsd = sessionPrlMined * prlPriceUsd;
+  const sessionEarnedRub = sessionEarnedUsd * usdToRub;
+
+  // Ежесекундный живой счётчик кВт·ч и добытых монет PRL
+  useEffect(() => {
+    const liveTicker = setInterval(() => {
+      const kwhPerSec = totalWallKw / 3600;
+      setSessionKwhUsed((prev) => Number((prev + kwhPerSec).toFixed(5)));
+      if (rigConfig.miningActive && totalHashrate > 0) {
+        const prlPerSec = ((totalHashrate / 100) * prlPer100MhDay) / 86400;
+        setSessionPrlMined((prev) => Number((prev + prlPerSec).toFixed(5)));
+      }
+    }, 1000);
+    return () => clearInterval(liveTicker);
+  }, [totalWallKw, totalHashrate, prlPer100MhDay, rigConfig.miningActive]);
+
   const totalShares = gpuMetrics[0].acceptedShares + gpuMetrics[1].acceptedShares;
   const totalRejected = gpuMetrics[0].rejectedShares + gpuMetrics[1].rejectedShares;
 
@@ -1465,39 +1521,52 @@ export default function App() {
           )}
 
           {activeTab === 'telemetry' && (
-            <div className="space-y-8">
-              {/* Primary Mining Start / Stop Control Bar inside the Program */}
-              <div className="p-6 rounded-lg border border-slate-800 bg-[#111827] flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-                <div className="space-y-1.5">
-                  <div className="text-xs font-mono text-slate-400">
-                    Статус майнера:{' '}
+            <div className="space-y-7">
+              {/* Современный главный пульт управления ригом */}
+              <div className="relative p-6 rounded-2xl border border-white/[0.09] bg-gradient-to-r from-[#131D31] via-[#0F172A] to-[#111C2D] shadow-[0_20px_50px_-15px_rgba(0,0,0,0.75)] flex flex-col lg:flex-row lg:items-center justify-between gap-6 overflow-hidden">
+                <div className="pointer-events-none absolute -right-16 -top-16 w-64 h-64 rounded-full bg-emerald-500/10 blur-3xl" />
+
+                <div className="relative space-y-2">
+                  <div className="flex flex-wrap items-center gap-2.5 text-xs font-mono">
                     <span
-                      className={
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full font-semibold border ${
                         rigConfig.miningActive
-                          ? 'text-emerald-400 font-semibold'
-                          : 'text-amber-400 font-semibold'
-                      }
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                          : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      }`}
                     >
-                      {rigConfig.miningActive ? 'РАБОТАЕТ (АКТИВЕН)' : 'ОСТАНОВЛЕН (ОЖИДАНИЕ)'}
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          rigConfig.miningActive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                        }`}
+                      />
+                      {rigConfig.miningActive ? 'МАЙНИНГ АКТИВЕН' : 'ОСТАНОВЛЕН'}
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full bg-slate-900/90 border border-white/[0.07] text-slate-300">
+                      Чистая прибыль: <strong className="text-emerald-400">+{netProfitRubDay.toFixed(0)} ₽/сут</strong>
+                    </span>
+                    <span className="px-2.5 py-1 rounded-full bg-slate-900/90 border border-white/[0.07] text-cyan-300">
+                      Розетка сейчас: <strong>{totalWallWatts} Вт ({totalWallKw.toFixed(3)} кВт)</strong>
                     </span>
                   </div>
-                  <h1 className="text-2xl font-bold text-slate-100">
-                    Управление запуском майнинга {rigConfig.workerName}
+
+                  <h1 className="text-2xl font-bold tracking-tight text-white">
+                    Центр управления ригом {rigConfig.workerName} · Dual RTX 4070 Ti
                   </h1>
                   <p className="text-xs text-slate-400">
-                    <span>OneZeroMiner 1.8.3</span>
+                    <span>OneZeroMiner 1.8.3 (pearlhash)</span>
                     <span aria-hidden="true"> · </span>
                     <span>Пул: {rigConfig.primaryPool}</span>
                     <span aria-hidden="true"> · </span>
-                    <span>Авто-маршрут /32 в обход INCY VPN</span>
+                    <span>Прямой маршрут /32 в обход INCY VPN</span>
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                <div className="relative flex flex-wrap items-center gap-3 shrink-0">
                   {!rigConfig.miningActive ? (
                     <button
                       onClick={() => handleToggleMining(true)}
-                      className="px-6 py-3 text-sm font-bold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 transition-colors flex items-center gap-2.5 whitespace-nowrap cursor-pointer"
+                      className="px-6 py-3 text-sm font-bold text-slate-950 bg-gradient-to-r from-emerald-400 to-teal-300 rounded-xl hover:brightness-110 shadow-[0_0_25px_rgba(16,185,129,0.4)] transition-all flex items-center gap-2.5 whitespace-nowrap cursor-pointer"
                     >
                       <Play className="w-4 h-4 fill-current" />
                       Запустить майнинг
@@ -1506,14 +1575,14 @@ export default function App() {
                     <>
                       <button
                         onClick={() => handleToggleMining(true)}
-                        className="px-4 py-2.5 text-xs font-semibold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                        className="px-4 py-2.5 text-xs font-bold text-slate-950 bg-gradient-to-r from-emerald-400 to-teal-300 rounded-xl hover:brightness-110 shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
-                        Перезапустить майнинг
+                        Перезапустить
                       </button>
                       <button
                         onClick={() => handleToggleMining(false)}
-                        className="px-5 py-2.5 text-xs font-semibold text-white bg-red-500 rounded-lg hover:bg-red-400 transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                        className="px-5 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-red-500 to-rose-600 rounded-xl hover:brightness-110 shadow-[0_0_20px_rgba(239,68,68,0.3)] transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer"
                       >
                         <Square className="w-3.5 h-3.5 fill-current" />
                         Остановить майнинг
@@ -1526,19 +1595,203 @@ export default function App() {
                       setDraftWalletAddress(rigConfig.walletAddress);
                       setShowWalletModal((prev) => !prev);
                     }}
-                    className="px-3.5 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 border border-emerald-500/40 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+                    className="px-3.5 py-2.5 text-xs font-semibold text-slate-100 bg-slate-900/90 border border-emerald-500/40 rounded-xl hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
                   >
                     <Wallet className="w-3.5 h-3.5 text-emerald-400" />
-                    Кошелёк: добавить / изменить
+                    Кошелёк
                   </button>
 
                   <button
                     onClick={handleSimulateVpnRecovery}
-                    className="px-3.5 py-2.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+                    className="px-3.5 py-2.5 text-xs font-medium text-slate-200 bg-slate-900/90 border border-white/[0.1] rounded-xl hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
                   >
-                    <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                    <Wifi className="w-3.5 h-3.5 text-cyan-400" />
                     Обход VPN /32
                   </button>
+                </div>
+              </div>
+
+              {/* НОВЫЙ БЛОК: Примерный заработок и общий расход электроэнергии в реальном времени */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                {/* Карточка 1: Примерный заработок и чистая прибыль (7 колонок) */}
+                <div className="lg:col-span-7 p-6 rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#131E32]/95 via-[#0E1627]/95 to-[#0A0F1C]/95 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.7)] flex flex-col justify-between space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-white/[0.07]">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                        <TrendingUp className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h2 className="text-base font-bold text-white">
+                          Примерный заработок и чистая прибыль (Real-Time)
+                        </h2>
+                        <p className="text-xs text-slate-400">
+                          Автоматический расчёт по текущему хешрейту <span className="text-emerald-400 font-mono">{totalHashrate} MH/s</span> за вычетом света
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="px-3.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-right">
+                      <div className="text-[10px] uppercase tracking-wider text-emerald-300 font-semibold">
+                        Чистая прибыль в сутки
+                      </div>
+                      <div className="text-lg font-bold font-mono text-emerald-400">
+                        {netProfitRubDay >= 0 ? '+' : ''}
+                        {netProfitRubDay.toFixed(1)} ₽{' '}
+                        <span className="text-xs text-slate-300">(${netProfitUsdDay.toFixed(2)})</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Живой счётчик текущей сессии + прогноз (Час / Сутки / Месяц) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3.5 rounded-xl bg-slate-950/70 border border-emerald-500/30 space-y-1">
+                      <div className="text-[11px] text-emerald-300 font-medium flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                        За текущую сессию
+                      </div>
+                      <div className="text-base font-bold font-mono text-white">
+                        {sessionPrlMined.toFixed(4)} PRL
+                      </div>
+                      <div className="text-xs font-mono text-emerald-400">
+                        ≈ {sessionEarnedRub.toFixed(2)} ₽ (${sessionEarnedUsd.toFixed(2)})
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-slate-950/55 border border-white/[0.06] space-y-1">
+                      <div className="text-[11px] text-slate-400">Доход за 1 час</div>
+                      <div className="text-base font-bold font-mono text-slate-100">
+                        {prlPerHour.toFixed(2)} PRL
+                      </div>
+                      <div className="text-xs font-mono text-slate-300">
+                        {grossRubHour.toFixed(1)} ₽ · ${(prlPerHour * prlPriceUsd).toFixed(2)}
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-slate-950/55 border border-white/[0.06] space-y-1">
+                      <div className="text-[11px] text-slate-400">Доход за 24 часа</div>
+                      <div className="text-base font-bold font-mono text-emerald-400">
+                        {prlPerDay.toFixed(1)} PRL
+                      </div>
+                      <div className="text-xs font-mono text-slate-200">
+                        {grossRubDay.toFixed(0)} ₽ · ${grossUsdDay.toFixed(2)}
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-slate-950/55 border border-white/[0.06] space-y-1">
+                      <div className="text-[11px] text-slate-400">Доход за 30 дней</div>
+                      <div className="text-base font-bold font-mono text-emerald-400">
+                        {prlPerMonth.toFixed(0)} PRL
+                      </div>
+                      <div className="text-xs font-mono text-slate-200">
+                        {grossRubMonth.toFixed(0)} ₽ · ${grossUsdMonth.toFixed(1)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Быстрая настройка курса и доходности сети */}
+                  <div className="pt-2 border-t border-white/[0.06] grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <div className="flex items-center justify-between gap-2 bg-slate-950/50 px-3 py-2 rounded-xl border border-white/[0.05]">
+                      <span className="text-slate-400">Курс PRL ($):</span>
+                      <input
+                        type="number"
+                        step="0.005"
+                        value={prlPriceUsd}
+                        onChange={(e) => setPrlPriceUsd(Math.max(0.0001, Number(e.target.value)))}
+                        className="w-20 text-right font-mono font-semibold text-emerald-400 bg-transparent focus:outline-none"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-2 bg-slate-950/50 px-3 py-2 rounded-xl border border-white/[0.05]">
+                      <span className="text-slate-400">Курс USD (₽):</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        value={usdToRub}
+                        onChange={(e) => setUsdToRub(Math.max(1, Number(e.target.value)))}
+                        className="w-20 text-right font-mono font-semibold text-slate-100 bg-transparent focus:outline-none"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-2 bg-slate-950/50 px-3 py-2 rounded-xl border border-white/[0.05]">
+                      <span className="text-slate-400">Чистыми/мес:</span>
+                      <span className="font-mono font-bold text-emerald-400">
+                        +{netProfitRubMonth.toFixed(0)} ₽
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Карточка 2: Общий расход электроэнергии в реальном времени (5 колонок) */}
+                <div className="lg:col-span-5 p-6 rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#131E32]/95 via-[#0E1627]/95 to-[#0A0F1C]/95 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.7)] flex flex-col justify-between space-y-5">
+                  <div className="flex items-center justify-between gap-3 pb-4 border-b border-white/[0.07]">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0">
+                        <Zap className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h2 className="text-base font-bold text-white">
+                          Расход электроэнергии (Live Счётчик)
+                        </h2>
+                        <p className="text-xs text-slate-400">
+                          Карты ({totalPower} Вт) + система и КПД БП ({rigConfig.miningActive ? systemOverheadWatts : 28} Вт)
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right font-mono">
+                      <div className="text-xs text-slate-400">С розетки</div>
+                      <div className="text-lg font-bold text-cyan-400">{totalWallWatts} W</div>
+                    </div>
+                  </div>
+
+                  {/* Электронный счётчик кВт·ч в реальном времени */}
+                  <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-500/30 flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-wider text-cyan-300 font-semibold flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
+                        Намотано за сессию (кВт·ч)
+                      </div>
+                      <div className="text-2xl font-bold font-mono text-white tracking-wider mt-0.5">
+                        {sessionKwhUsed.toFixed(5)} <span className="text-xs text-cyan-400">кВт·ч</span>
+                      </div>
+                    </div>
+                    <div className="text-right font-mono">
+                      <div className="text-[11px] text-slate-400">Стоимость за сессию</div>
+                      <div className="text-base font-bold text-amber-300">
+                        {sessionCostRub.toFixed(2)} ₽
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {powerCostRubHour.toFixed(2)} ₽ в час
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                    <div className="p-3 rounded-xl bg-slate-950/55 border border-white/[0.06] flex items-center justify-between">
+                      <span className="text-slate-400 font-sans">За сутки (24ч):</span>
+                      <span className="text-slate-100 font-semibold">
+                        {kwhPerDay.toFixed(2)} кВт·ч ({powerCostRubDay.toFixed(0)} ₽)
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-xl bg-slate-950/55 border border-white/[0.06] flex items-center justify-between">
+                      <span className="text-slate-400 font-sans">За месяц (30д):</span>
+                      <span className="text-amber-300 font-semibold">
+                        {kwhPerMonth.toFixed(0)} кВт·ч ({powerCostRubMonth.toFixed(0)} ₽)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between gap-3 text-xs">
+                    <span className="text-slate-400">Твой тариф за электроэнергию (₽ / кВт·ч):</span>
+                    <div className="flex items-center gap-1.5 bg-slate-950/70 px-3 py-1.5 rounded-xl border border-cyan-500/30">
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={electricityTariffRub}
+                        onChange={(e) => setElectricityTariffRub(Math.max(0, Number(e.target.value)))}
+                        className="w-16 text-right font-mono font-bold text-cyan-300 bg-transparent focus:outline-none"
+                      />
+                      <span className="font-mono text-slate-400">₽/кВт·ч</span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1546,11 +1799,11 @@ export default function App() {
               <div className="space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-base font-semibold text-slate-100">
-                      01. Главная приборная панель рига (Датчики-спидометры в реальном времени)
+                    <h2 className="text-base font-bold text-white">
+                      01. Главная приборная панель рига (Стрелочные спидометры)
                     </h2>
                     <p className="text-xs text-slate-400">
-                      Аналогово-цифровые спидометры суммарного хешрейта, питания, температурного режима и задержки пула
+                      Аналогово-цифровые спидометры суммарного хешрейта, полного энергопотребления с розетки, температуры и пинга
                     </p>
                   </div>
                   <div className="flex items-center gap-3 text-xs font-mono text-slate-300">
@@ -1569,33 +1822,35 @@ export default function App() {
                     max={600}
                     unit="MH/s"
                     decimals={1}
+                    accent="emerald"
                     extraInfo={[
                       { label: 'GPU #0', value: `${gpuMetrics[0].hashrateMHs.toFixed(1)} MH/s`, highlight: 'ok' },
                       { label: 'GPU #1', value: `${gpuMetrics[1].hashrateMHs.toFixed(1)} MH/s`, highlight: 'ok' },
-                      { label: 'Ядро CUDA', value: 'Kernel 2 Compact' },
-                      { label: 'Сложность', value: '8.59 G (Stratum)' },
+                      { label: 'Доход/сут', value: `${prlPerDay.toFixed(1)} PRL`, highlight: 'ok' },
+                      { label: 'В рублях', value: `${grossRubDay.toFixed(0)} ₽/сут` },
                     ]}
                   />
 
                   <SpeedometerGauge
-                    label="Мощность и питание"
-                    sublabel="Суммарно 2× RTX 4070 Ti"
-                    value={totalPower}
+                    label="Общий расход энергии"
+                    sublabel={`С розетки: ${totalWallKw.toFixed(3)} кВт`}
+                    value={totalWallWatts}
                     min={0}
-                    max={420}
-                    warningThreshold={330}
-                    criticalThreshold={370}
+                    max={480}
+                    warningThreshold={380}
+                    criticalThreshold={430}
                     unit="W (Ватт)"
                     decimals={1}
+                    accent="cyan"
                     extraInfo={[
-                      { label: 'Лимит PL', value: `${rigConfig.gpus[0].pl + rigConfig.gpus[1].pl} W` },
+                      { label: 'Только GPU', value: `${totalPower} W` },
                       {
-                        label: 'Эффективность',
-                        value: `${totalPower > 0 ? (totalHashrate / totalPower).toFixed(2) : '0.00'} MH/W`,
+                        label: 'Намотано',
+                        value: `${sessionKwhUsed.toFixed(3)} кВт·ч`,
                         highlight: 'ok',
                       },
-                      { label: 'Напряжение', value: `${gpuMetrics[0].voltageMv} / ${gpuMetrics[1].voltageMv} mV` },
-                      { label: 'Режим питания', value: `${gpuMetrics[0].pState} / ${gpuMetrics[1].pState}` },
+                      { label: 'Свет/сутки', value: `${kwhPerDay.toFixed(1)} кВт·ч` },
+                      { label: 'Расход ₽/сут', value: `${powerCostRubDay.toFixed(0)} ₽`, highlight: 'warn' },
                     ]}
                   />
 
@@ -1609,9 +1864,10 @@ export default function App() {
                     criticalThreshold={policy.maxTempC}
                     unit="°C (Ядро)"
                     decimals={0}
+                    accent="amber"
                     extraInfo={[
                       {
-                        label: 'Hotspot (кристалл)',
+                        label: 'Hotspot',
                         value: `${Math.max(gpuMetrics[0].hotspotTempC, gpuMetrics[1].hotspotTempC).toFixed(1)} °C`,
                         highlight:
                           Math.max(gpuMetrics[0].hotspotTempC, gpuMetrics[1].hotspotTempC) > 80
@@ -1619,11 +1875,11 @@ export default function App() {
                             : 'ok',
                       },
                       {
-                        label: 'Память GDDR6X',
+                        label: 'Память VRAM',
                         value: `${gpuMetrics[0].vramTempC}° / ${gpuMetrics[1].vramTempC}°C`,
                       },
                       {
-                        label: 'Обороты кулера',
+                        label: 'Кулеры',
                         value: `${gpuMetrics[0].fanRpm} / ${gpuMetrics[1].fanRpm} RPM`,
                       },
                       { label: 'Аварийный PL', value: `${policy.emergencyPlWatts} W` },
@@ -1640,19 +1896,20 @@ export default function App() {
                     criticalThreshold={150}
                     unit="ms (Пинг)"
                     decimals={0}
+                    accent="violet"
                     extraInfo={[
                       {
-                        label: 'Шары (Принято)',
-                        value: `${totalShares} (${totalRejected} откл.)`,
+                        label: 'Шары',
+                        value: `${totalShares} / ${totalRejected}`,
                         highlight: 'ok',
                       },
                       {
-                        label: 'Обход INCY VPN',
-                        value: vpnBypassState === 'active' ? 'Маршрут /32 ОК' : 'Пересборка...',
+                        label: 'INCY VPN',
+                        value: vpnBypassState === 'active' ? 'Обход /32 ОК' : 'Ремонт...',
                         highlight: vpnBypassState === 'active' ? 'ok' : 'warn',
                       },
-                      { label: 'DNS резолвер', value: 'dns.google (DoH)' },
-                      { label: 'Резервный пул', value: 'SSL :8048 Готов' },
+                      { label: 'DNS', value: 'dns.google' },
+                      { label: 'Резерв', value: 'SSL :8048' },
                     ]}
                   />
                 </div>

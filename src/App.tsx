@@ -20,6 +20,9 @@ import {
   Monitor,
   Play,
   Square,
+  Wallet,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import {
   RigConfig,
@@ -140,10 +143,10 @@ export default function App() {
       telegramChatId: '',
       github: {
         enabled: true,
-        owner: '',
-        repo: 'pearl-rig-control',
+        owner: 'vovik06302-ai',
+        repo: 'bit',
         branch: 'main',
-        isPrivate: false,
+        isPrivate: true,
         token: '',
         pullIntervalMin: 5,
         autoApplyRemoteConfig: true,
@@ -210,6 +213,32 @@ export default function App() {
     state: 'idle',
     msg: '',
   });
+
+  const [showWalletModal, setShowWalletModal] = useState<boolean>(false);
+  const [draftWalletAddress, setDraftWalletAddress] = useState<string>(rigConfig.walletAddress);
+  const [newWalletLabel, setNewWalletLabel] = useState<string>('');
+  const [walletSavedBanner, setWalletSavedBanner] = useState<string>('');
+  const [savedWallets, setSavedWallets] = useState<Array<{ id: string; label: string; address: string }>>(() => {
+    const saved = localStorage.getItem('pearl_saved_wallets_v1');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // fallback
+      }
+    }
+    return [
+      {
+        id: 'w-default',
+        label: 'Текущий кошелёк из батника',
+        address: '[REMOVED_LOCAL_WALLET]',
+      },
+    ];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('pearl_saved_wallets_v1', JSON.stringify(savedWallets));
+  }, [savedWallets]);
 
   const [events, setEvents] = useState<WatchdogEvent[]>([
     {
@@ -427,6 +456,80 @@ export default function App() {
         'Процесс onezerominer.exe переведён в режим ожидания. Карты RTX 4070 Ti переведены в покой (16.5 W).'
       );
     }
+  };
+
+  const handleSaveAndApplyWallet = async (addressToApply: string, labelOptional?: string) => {
+    const clean = addressToApply.trim();
+    if (!clean) return;
+
+    setRigConfig((prev) => ({ ...prev, walletAddress: clean }));
+    setDraftWalletAddress(clean);
+
+    setSavedWallets((prev) => {
+      const exists = prev.some((w) => w.address === clean);
+      if (exists) return prev;
+      return [
+        {
+          id: `w-${Date.now()}`,
+          label: labelOptional?.trim() || `Кошелёк Pearl (${clean.slice(0, 10)}...)`,
+          address: clean,
+        },
+        ...prev,
+      ];
+    });
+
+    let bridgeUpdated = false;
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 1200);
+      const res = await fetch(
+        `http://127.0.0.1:${rigConfig.agentBridgePort}/set_wallet?wallet=${encodeURIComponent(clean)}`,
+        { method: 'GET', signal: controller.signal }
+      );
+      clearTimeout(t);
+      if (res.ok) {
+        bridgeUpdated = true;
+        setLocalBridgeConnected(true);
+      }
+    } catch {
+      // bridge offline
+    }
+
+    setWalletSavedBanner(
+      bridgeUpdated
+        ? `Кошелёк применён и передан в программу на ПК: ${clean}`
+        : `Кошелёк сохранён в конфигурации: ${clean}`
+    );
+    setTimeout(() => setWalletSavedBanner(''), 4000);
+
+    addWatchdogEvent(
+      'OC_PROFILE',
+      'info',
+      bridgeUpdated
+        ? `Адрес кошелька обновлён на ПК через мост 127.0.0.1:3002 (${clean.length} симв.)`
+        : `Адрес кошелька изменён в программе (${clean.length} симв.)`,
+      `-w ${clean}`
+    );
+  };
+
+  const handleAddNewWalletToList = () => {
+    const clean = draftWalletAddress.trim();
+    if (!clean) return;
+    const label = newWalletLabel.trim() || `Кошелёк Pearl #${savedWallets.length + 1}`;
+    setSavedWallets((prev) => [
+      {
+        id: `w-${Date.now()}`,
+        label,
+        address: clean,
+      },
+      ...prev.filter((w) => w.address !== clean),
+    ]);
+    setNewWalletLabel('');
+    handleSaveAndApplyWallet(clean, label);
+  };
+
+  const handleDeleteSavedWallet = (id: string) => {
+    setSavedWallets((prev) => prev.filter((w) => w.id !== id));
   };
 
   const handleDownloadBat = () => {
@@ -929,6 +1032,17 @@ export default function App() {
 
         <div className="flex items-center gap-3 shrink-0">
           <button
+            onClick={() => {
+              setDraftWalletAddress(rigConfig.walletAddress);
+              setShowWalletModal((prev) => !prev);
+            }}
+            className="px-3.5 py-2 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+          >
+            <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Изменить / добавить кошелёк</span>
+          </button>
+
+          <button
             onClick={() => handleToggleMining(!rigConfig.miningActive)}
             className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer ${
               rigConfig.miningActive
@@ -1065,6 +1179,137 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 p-6 lg:p-8 space-y-8 overflow-y-auto">
+          {showWalletModal && (
+            <div className="p-6 rounded-lg border border-emerald-500/40 bg-[#111827] space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2.5">
+                  <Wallet className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <div>
+                    <h2 className="text-base font-bold text-slate-100">
+                      Добавление и изменение адреса кошелька Pearl (-w)
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                      Измени текущий адрес или добавь несколько кошельков для быстрого переключения (автоматически передаётся в программу на ПК)
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowWalletModal(false)}
+                  className="px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-800 rounded-md hover:bg-slate-700 transition-colors self-start sm:self-auto cursor-pointer"
+                >
+                  Скрыть панель
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
+                <div className="lg:col-span-6 space-y-1">
+                  <label className="block text-xs font-medium text-slate-300">
+                    Адрес кошелька Pearl (prl1p... 63 символа) или логин Kryptex
+                  </label>
+                  <input
+                    type="text"
+                    value={draftWalletAddress}
+                    onChange={(e) => setDraftWalletAddress(e.target.value)}
+                    placeholder="Вставь полный адрес prl1p..."
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-slate-900 border border-slate-700 text-sm font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div className="lg:col-span-3 space-y-1">
+                  <label className="block text-xs font-medium text-slate-300">
+                    Название кошелька (необязательно)
+                  </label>
+                  <input
+                    type="text"
+                    value={newWalletLabel}
+                    onChange={(e) => setNewWalletLabel(e.target.value)}
+                    placeholder="Напр.: Основной Pearl"
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div className="lg:col-span-3 flex items-end gap-2">
+                  <button
+                    onClick={() => handleSaveAndApplyWallet(draftWalletAddress, newWalletLabel)}
+                    className="flex-1 px-4 py-2.5 text-xs font-bold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    Сохранить адрес
+                  </button>
+                  <button
+                    onClick={handleAddNewWalletToList}
+                    title="Добавить в список сохранённых кошельков"
+                    className="px-3 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4 text-emerald-400" />
+                    Добавить
+                  </button>
+                </div>
+              </div>
+
+              {walletSavedBanner && (
+                <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-xs text-emerald-300 font-mono">
+                  {walletSavedBanner}
+                </div>
+              )}
+
+              <div className="space-y-2 pt-2">
+                <div className="text-xs font-semibold text-slate-300">
+                  Сохранённые кошельки ({savedWallets.length}):
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                  {savedWallets.map((w) => {
+                    const isCurrent = w.address === rigConfig.walletAddress;
+                    return (
+                      <div
+                        key={w.id}
+                        className={`p-3 rounded-lg border flex items-center justify-between gap-3 ${
+                          isCurrent
+                            ? 'border-emerald-500/50 bg-emerald-500/10'
+                            : 'border-slate-800 bg-slate-900/70'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-slate-200 flex items-center gap-2">
+                            <span className="truncate">{w.label}</span>
+                            {isCurrent && (
+                              <span className="text-[11px] font-mono text-emerald-400">
+                                · Активен
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs font-mono text-slate-400 truncate mt-0.5">
+                            {w.address}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {!isCurrent && (
+                            <button
+                              onClick={() => handleSaveAndApplyWallet(w.address, w.label)}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-slate-950 bg-emerald-400 rounded-md hover:bg-emerald-300 transition-colors cursor-pointer"
+                            >
+                              Выбрать
+                            </button>
+                          )}
+                          {savedWallets.length > 1 && (
+                            <button
+                              onClick={() => handleDeleteSavedWallet(w.id)}
+                              className="p-1.5 text-slate-400 hover:text-red-400 rounded-md hover:bg-slate-800 transition-colors cursor-pointer"
+                              title="Удалить кошелёк из списка"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
           {activeTab === 'telemetry' && (
             <div className="space-y-8">
               {/* Primary Mining Start / Stop Control Bar inside the Program */}
@@ -1121,6 +1366,17 @@ export default function App() {
                       </button>
                     </>
                   )}
+
+                  <button
+                    onClick={() => {
+                      setDraftWalletAddress(rigConfig.walletAddress);
+                      setShowWalletModal((prev) => !prev);
+                    }}
+                    className="px-3.5 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 border border-emerald-500/40 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+                  >
+                    <Wallet className="w-3.5 h-3.5 text-emerald-400" />
+                    Кошелёк: добавить / изменить
+                  </button>
 
                   <button
                     onClick={handleSimulateVpnRecovery}
@@ -1409,15 +1665,35 @@ export default function App() {
                     <label className="block text-xs font-medium text-slate-300">
                       Кошелёк Pearl (prl1p... 63 символа) или логин Kryptex
                     </label>
-                    <input
-                      type="text"
-                      value={rigConfig.walletAddress}
-                      onChange={(e) =>
-                        setRigConfig((prev) => ({ ...prev, walletAddress: e.target.value }))
-                      }
-                      placeholder="prl1p..."
-                      className="w-full px-3.5 py-2.5 rounded-lg bg-slate-900 border border-slate-700 text-sm font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
-                    />
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={rigConfig.walletAddress}
+                        onChange={(e) => {
+                          setRigConfig((prev) => ({ ...prev, walletAddress: e.target.value }));
+                          setDraftWalletAddress(e.target.value);
+                        }}
+                        placeholder="prl1p..."
+                        className="flex-1 px-3.5 py-2.5 rounded-lg bg-slate-900 border border-slate-700 text-sm font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                      />
+                      <button
+                        onClick={() => handleSaveAndApplyWallet(rigConfig.walletAddress)}
+                        className="px-4 py-2.5 text-xs font-bold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 transition-colors flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+                      >
+                        <Wallet className="w-4 h-4" />
+                        Сохранить и применить кошелёк
+                      </button>
+                      <button
+                        onClick={() => {
+                          setDraftWalletAddress(rigConfig.walletAddress);
+                          setShowWalletModal(true);
+                        }}
+                        className="px-3.5 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                      >
+                        <Plus className="w-4 h-4 text-emerald-400" />
+                        Список кошельков
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-1.5">
@@ -1434,6 +1710,12 @@ export default function App() {
                     />
                   </div>
                 </div>
+
+                {walletSavedBanner && (
+                  <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-xs text-emerald-300 font-mono">
+                    {walletSavedBanner}
+                  </div>
+                )}
 
                 <div
                   className={`p-3.5 rounded-lg border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${

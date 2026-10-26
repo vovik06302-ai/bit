@@ -43,6 +43,7 @@ $AppVersion = "3.1.0"
 $UpdateRepo = "pearl-miner/pearl-rig-control"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false
+$script:DownloadActive = $false
 $script:DownloadProgress = 0
 
 # Профиль для двух RTX 4070 Ti (без повышения напряжения):
@@ -912,6 +913,18 @@ $btnStart.Add_Click({ Start-MinerProcess -IsWatchdogRestart $false })
 $btnStop.Add_Click({ Stop-MinerProcess "Явная остановка пользователем (кнопка Стоп)" })
 $btnRefreshNow.Add_Click({ Poll-RealTelemetry })
 
+# Кнопка обновлений: без новой версии — повторная проверка; с новой версией — загрузка с огненной шкалой
+$btnCheckUpdate.Add_Click({
+    if ($script:DownloadActive) { return }
+    if ($script:UpdateAvailable -and $script:LatestVersion) {
+        Start-AgentUpdateDownload
+    } else {
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+        $lblUpdateInfo.Text = "Проверка обновлений на GitHub Releases..."
+        Test-UpdateAvailable
+    }
+})
+
 $existingOnOpen = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($existingOnOpen) {
     $script:IsMiningRunning = $true
@@ -926,6 +939,7 @@ if ($existingOnOpen) {
 
 Sync-WalletUiState
 Poll-RealTelemetry
+Test-UpdateAvailable
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000

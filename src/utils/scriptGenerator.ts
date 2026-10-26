@@ -3,6 +3,7 @@ import { RigConfig, WatchdogPolicy, LogDiagnosticItem } from '../types/rig';
 
 const BECH32_CHARSET_REGEX = /^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
 const KNOWN_TRUNCATED_SAMPLE = '[REMOVED_LOCAL_WALLET]';
+export const DEFAULT_PEARL_WALLET = '[REMOVED_LOCAL_WALLET]';
 
 export function validatePearlWallet(address: string): {
   valid: boolean;

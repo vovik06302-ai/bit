@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fetchEarnings } from './pool-earnings.mjs';
+import { fetchMarketRates } from './market-rates.mjs';
 import { fetchMinerStatus } from './miner-status.mjs';
 import { collectTelemetry } from './collect-telemetry.mjs';
 import { authorizeRequest, validateProfile } from './control-policy.mjs';
@@ -41,7 +42,7 @@ async function persistLauncher(config) {
   await writeFile(config.launcherPath, body);
 }
 
-export function createPanelServer({ base = home, stateRoot = process.env.PEARL_STATE_DIR || base, runControl = runAdminControl, loadEarnings = fetchEarnings, loadMinerStatus = fetchMinerStatus, loadTelemetry = collectTelemetry } = {}) {
+export function createPanelServer({ base = home, stateRoot = process.env.PEARL_STATE_DIR || base, runControl = runAdminControl, loadEarnings = fetchEarnings, loadMarketRates = fetchMarketRates, loadMinerStatus = fetchMinerStatus, loadTelemetry = collectTelemetry } = {}) {
   const root = path.join(base, 'dist');
   const configPath = path.join(stateRoot, 'rig-local.json');
   const runtime = path.join(stateRoot, '.runtime');
@@ -49,6 +50,8 @@ export function createPanelServer({ base = home, stateRoot = process.env.PEARL_S
   let job = null;
   let earnings = null;
   let earningsPromise = null;
+  let marketRates = null;
+  let marketRatesPromise = null;
   let minerStatus = null;
   let minerStatusPromise = null;
   let telemetry = null;
@@ -104,6 +107,16 @@ export function createPanelServer({ base = home, stateRoot = process.env.PEARL_S
           catch (e) { return json(res, earnings ? 200 : 503, { ...earnings, stale: true, error: e.message }); }
         }
         return json(res, 200, { ...earnings, stale: false });
+      }
+      if (req.method === 'GET' && url.pathname === '/api/market-rates') {
+        const forceRefresh = url.searchParams.get('refresh') === '1';
+        if (forceRefresh) marketRates = null;
+        if (!marketRates || Date.now() - Date.parse(marketRates.fetchedAt) >= 900000) {
+          if (!marketRatesPromise) marketRatesPromise = loadMarketRates().then(value => (marketRates = value)).finally(() => { marketRatesPromise = null; });
+          try { await marketRatesPromise; }
+          catch (e) { return json(res, marketRates ? 200 : 503, { ...marketRates, stale: true, error: e.message }); }
+        }
+        return json(res, 200, { ...marketRates, stale: false });
       }
       if (req.method === 'GET' && url.pathname === '/api/miner-status') {
         const config = await configRead();

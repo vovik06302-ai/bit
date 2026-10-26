@@ -28,9 +28,10 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
   const [rates, setRates] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('pearl_panel_rates_v1') ?? '{}');
-      return { prlRub: typeof saved.prlRub === 'number' ? saved.prlRub : 0, kwhRub: typeof saved.kwhRub === 'number' ? saved.kwhRub : 0 };
-    } catch { return { prlRub: 0, kwhRub: 0 }; }
+      return { kwhRub: typeof saved.kwhRub === 'number' ? saved.kwhRub : 0 };
+    } catch { return { kwhRub: 0 }; }
   });
+  const [marketRates, setMarketRates] = useState<any>(null);
   const [energyKwh, setEnergyKwh] = useState(() => {
     try { const value = Number(localStorage.getItem('pearl_measured_gpu_kwh_v1')); return Number.isFinite(value) && value >= 0 ? value : 0; }
     catch { return 0; }
@@ -43,8 +44,8 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
   const totalPowerKw = totalPowerWatts === null ? null : totalPowerWatts / 1000;
   const powerCostPerHour = totalPowerKw !== null && rates.kwhRub > 0 ? totalPowerKw * rates.kwhRub : null;
   const measuredCost = rates.kwhRub > 0 ? energyKwh * rates.kwhRub : null;
-  const confirmedValueRub = rates.prlRub > 0 && typeof earnings?.confirmed === 'number' ? earnings.confirmed * rates.prlRub : null;
-  const balanceValueRub = rates.prlRub > 0 && typeof earnings?.balance === 'number' ? earnings.balance * rates.prlRub : null;
+  const confirmedValueRub = marketRates?.prlRub > 0 && typeof earnings?.confirmed === 'number' ? earnings.confirmed * marketRates.prlRub : null;
+  const balanceValueRub = marketRates?.prlRub > 0 && typeof earnings?.balance === 'number' ? earnings.balance * marketRates.prlRub : null;
 
   useEffect(() => { localStorage.setItem('pearl_panel_rates_v1', JSON.stringify(rates)); }, [rates]);
   useEffect(() => { localStorage.setItem('pearl_measured_gpu_kwh_v1', String(energyKwh)); }, [energyKwh]);
@@ -59,12 +60,28 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
     previousPower.current = { watts: totalPowerWatts, at: now };
   }, [totalPowerWatts]);
 
+  const refreshMarketRates = async (force = false) => {
+    const response = await fetch(`/api/market-rates${force ? '?refresh=1' : ''}`, { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? 'Официальный курс PRL недоступен');
+    setMarketRates(data);
+    return data;
+  };
+
+  useEffect(() => {
+    if (mode !== 'overview') return;
+    refreshMarketRates().catch(e => setMarketRates((old: any) => ({ ...old, stale: true, error: (e as Error).message })));
+    const timer = setInterval(() => refreshMarketRates().catch(e => setMarketRates((old: any) => ({ ...old, stale: true, error: (e as Error).message }))), 900000);
+    return () => clearInterval(timer);
+  }, [mode]);
+
   const refreshAll = async () => {
     setRefreshing(true);
     try {
       await Promise.all([
         loadSession(),
         onRefreshTelemetry?.(),
+        refreshMarketRates(true),
         fetch('/api/earnings?refresh=1', { cache: 'no-store' }).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error ?? 'Нет данных о начислениях'); setEarnings(data); }),
       ]);
       setError('');
@@ -229,9 +246,13 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
         </div>
         {(earnings?.error || earnings?.partial) && <p className="text-xs text-amber-300">{earnings.error ?? 'Часть данных пула недоступна. Отсутствующие суммы не заменяются нулями.'}</p>}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 border-t border-slate-800 pt-4">
-          <label className="text-xs text-slate-400">Курс PRL, ₽
-            <input type="number" min="0" step="0.000001" value={rates.prlRub || ''} onChange={e => setRates(old => ({ ...old, prlRub: Math.max(0, Number(e.target.value) || 0) }))} className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100 font-mono" placeholder="Введите курс вручную" />
-          </label>
+          <div className="rounded-lg bg-slate-950/60 border border-slate-800 p-3 text-xs">
+            <div className="text-slate-400">Официальный курс PRL</div>
+            <div className="mt-1 font-mono text-emerald-300">{marketRates?.prlRub ? `${marketRates.prlRub.toLocaleString('ru-RU', { maximumFractionDigits: 4 })} ₽` : 'нет свежего курса'}</div>
+            <div className="mt-1 text-[11px] text-slate-500">PRL/USD {marketRates?.prlUsd?.toFixed?.(6) ?? '—'} · USD/RUB {marketRates?.usdRub?.toFixed?.(4) ?? '—'}</div>
+            <a href="https://pool.kryptex.com/prl/price" target="_blank" rel="noreferrer" className="text-[11px] text-emerald-400 underline">Источник Kryptex ↗</a>
+            <span className="mx-1 text-[11px] text-slate-600">·</span><a href="https://www.cbr.ru/scripts/XML_daily.asp" target="_blank" rel="noreferrer" className="text-[11px] text-emerald-400 underline">Банк России ↗</a>
+          </div>
           <label className="text-xs text-slate-400">Электроэнергия, ₽/кВт·ч
             <input type="number" min="0" step="0.01" value={rates.kwhRub || ''} onChange={e => setRates(old => ({ ...old, kwhRub: Math.max(0, Number(e.target.value) || 0) }))} className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100 font-mono" placeholder="Введите тариф" />
           </label>

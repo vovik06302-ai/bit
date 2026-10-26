@@ -8,6 +8,7 @@ import { normalizeEarnings, fetchEarnings } from '../scripts/pool-earnings.mjs';
 import { validateProfile, authorizeRequest } from '../scripts/control-policy.mjs';
 import { classifyMiner, parseMinerLog } from '../scripts/miner-status.mjs';
 import { createPanelServer } from '../scripts/panel-server.mjs';
+import { normalizeMarketRates } from '../scripts/market-rates.mjs';
 
 const wallet = 'prl1p'+'q'.repeat(58);
 const profile = [0,1].map(id => ({id,cclk:2400,mclk:810,pl:150,kernel:2,fan:id ? '*' : '65'}));
@@ -30,6 +31,12 @@ test('pool outages never fabricate zero earnings', async () => {
   assert.equal(r.partial,true);
   assert.equal(r.paid,null);
   assert.equal(r.confirmed,0.2);
+});
+test('official market rates combine the latest Kryptex PRL/USD point with CBR USD/RUB', () => {
+  const rates = normalizeMarketRates([{ timestamp: 1700000000000, price: 1.5 }, { timestamp: 1700003600000, price: 1.6 }], '<ValCurs><Valute><CharCode>USD</CharCode><Value>90,00</Value></Valute></ValCurs>', 1700004000000);
+  assert.equal(rates.prlUsd, 1.6);
+  assert.equal(rates.usdRub, 90);
+  assert.equal(rates.prlRub, 144);
 });
 test('profiles reject unsafe limits, shell fragments and wallet modifications', () => {
   assert.deepEqual(validateProfile(profile),profile);

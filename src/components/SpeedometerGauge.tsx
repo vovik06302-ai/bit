@@ -3,7 +3,7 @@ import React, { useId } from 'react';
 export interface SpeedometerGaugeProps {
   label: string;
   sublabel?: string;
-  value: number;
+  value: number | null;
   min: number;
   max: number;
   unit: string;
@@ -46,11 +46,12 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
   extraInfo,
 }) => {
   const uid = useId().replace(/:/g, '');
+  const hasData = value !== null && Number.isFinite(value);
+  const numericValue = hasData ? (value as number) : min;
   const safeRange = Math.max(0.0001, max - min);
-  const clamped = Math.min(Math.max(value, min), max);
-  const ratio = (clamped - min) / safeRange;
+  const clamped = Math.min(Math.max(numericValue, min), max);
+  const ratio = hasData ? (clamped - min) / safeRange : 0;
 
-  // Sweep from -130 deg to +130 deg (260 deg modern sport cluster arc)
   const startAngle = -130;
   const endAngle = 130;
   const totalSweep = endAngle - startAngle;
@@ -68,9 +69,9 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
   const warnAngle = startAngle + warnRatio * totalSweep;
   const critAngle = startAngle + critRatio * totalSweep;
 
-  const isCritical = criticalThreshold !== undefined && value >= criticalThreshold;
+  const isCritical = hasData && criticalThreshold !== undefined && numericValue >= criticalThreshold;
   const isWarning =
-    !isCritical && warningThreshold !== undefined && value >= warningThreshold;
+    hasData && !isCritical && warningThreshold !== undefined && numericValue >= warningThreshold;
 
   const palette = {
     emerald: { main: '#10B981', bright: '#34D399', glow: 'rgba(16,185,129,0.35)' },
@@ -79,7 +80,9 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
     violet: { main: '#8B5CF6', bright: '#A78BFA', glow: 'rgba(139,92,246,0.35)' },
   }[accent];
 
-  const statusColor = isCritical
+  const statusColor = !hasData
+    ? '#64748B'
+    : isCritical
     ? '#EF4444'
     : isWarning
     ? '#F59E0B'
@@ -97,7 +100,7 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
     const tRatio = i / minorSteps;
     const angle = startAngle + tRatio * totalSweep;
     const isMajor = i % (minorSteps / majorSteps) === 0;
-    const isPassed = angle <= currentAngle && value > min;
+    const isPassed = hasData && angle <= currentAngle && numericValue > min;
     const outerPt = polarToCartesian(cx, cy, radius - 6, angle);
     const innerPt = polarToCartesian(cx, cy, radius - (isMajor ? 16 : 11), angle);
     const labelPt = polarToCartesian(cx, cy, radius - 27, angle);
@@ -131,7 +134,6 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
     );
   }
 
-  // Tapered modern needle geometry
   const needleTip = polarToCartesian(cx, cy, radius - 11, currentAngle);
   const needleTail = polarToCartesian(cx, cy, 15, currentAngle + 180);
   const needleSideL = polarToCartesian(cx, cy, 4.2, currentAngle - 90);
@@ -141,7 +143,6 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
 
   return (
     <div className="relative p-4 rounded-2xl border border-white/[0.08] bg-gradient-to-b from-[#141E30]/95 via-[#0F1726]/95 to-[#0A0F1A]/95 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.65)] flex flex-col justify-between overflow-hidden group hover:border-white/[0.15] transition-all">
-      {/* Subtle top ambient highlight */}
       <div
         className="pointer-events-none absolute -top-12 left-1/2 -translate-x-1/2 w-40 h-20 rounded-full blur-2xl opacity-25 transition-opacity group-hover:opacity-45"
         style={{ background: statusColor }}
@@ -154,18 +155,19 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
         </div>
         <span
           className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase tracking-wider ${
-            isCritical
+            !hasData
+              ? 'bg-slate-800/80 text-slate-400 border border-slate-700'
+              : isCritical
               ? 'bg-red-500/20 text-red-400 border border-red-500/40'
               : isWarning
               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
               : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
           }`}
         >
-          {isCritical ? 'АВАРИЯ' : isWarning ? 'ВНИМАНИЕ' : 'НОРМА'}
+          {!hasData ? 'НЕТ ДАННЫХ' : isCritical ? 'ПЕРЕГРЕВ / АВАРИЯ' : isWarning ? 'ВНИМАНИЕ' : 'НОРМА'}
         </span>
       </div>
 
-      {/* Modern Analog-Digital Speedometer Dial */}
       <div className="relative flex flex-col items-center justify-center my-0.5">
         <svg viewBox="0 0 210 158" className={`w-full ${svgHeight} overflow-visible`}>
           <defs>
@@ -185,10 +187,8 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
             </filter>
           </defs>
 
-          {/* Subtle inner dial face */}
           <circle cx={cx} cy={cy} r={radius + 2} fill={`url(#dialBg-${uid})`} />
 
-          {/* Outer precision bezel arc */}
           <path
             d={describeArc(cx, cy, radius + 6, startAngle, endAngle)}
             fill="none"
@@ -197,7 +197,6 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
             strokeDasharray="3 3"
           />
 
-          {/* Track background arc */}
           <path
             d={describeArc(cx, cy, radius, startAngle, endAngle)}
             fill="none"
@@ -206,7 +205,6 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
             strokeLinecap="round"
           />
 
-          {/* Zone segments */}
           <path
             d={describeArc(cx, cy, radius, startAngle, warnAngle)}
             fill="none"
@@ -229,8 +227,7 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
             strokeWidth="9"
           />
 
-          {/* Glowing Active Progress Arc */}
-          {ratio > 0.005 && (
+          {hasData && ratio > 0.005 && (
             <path
               d={describeArc(cx, cy, radius, startAngle, currentAngle)}
               fill="none"
@@ -242,17 +239,14 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
             />
           )}
 
-          {/* Ticks and scale numbers */}
           {ticks}
 
-          {/* Needle Shadow */}
           <polygon
             points={`${needleTip.x},${needleTip.y + 2} ${needleSideL.x},${needleSideL.y + 2} ${needleTail.x},${needleTail.y + 2} ${needleSideR.x},${needleSideR.y + 2}`}
             fill="rgba(0,0,0,0.55)"
             className="transition-all duration-500 ease-out"
           />
 
-          {/* Illuminated Speedometer Needle */}
           <polygon
             points={`${needleTip.x},${needleTip.y} ${needleSideL.x},${needleSideL.y} ${needleTail.x},${needleTail.y} ${needleSideR.x},${needleSideR.y}`}
             fill={`url(#needleGrad-${uid})`}
@@ -261,16 +255,14 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
             className="transition-all duration-500 ease-out"
           />
 
-          {/* Center Metallic Hub Cap */}
           <circle cx={cx} cy={cy} r="11" fill="#0B1120" stroke="#334155" strokeWidth="2" />
           <circle cx={cx} cy={cy} r="4.5" fill={statusColor} />
           <circle cx={cx - 1.2} cy={cy - 1.2} r="1.5" fill="#FFFFFF" fillOpacity="0.8" />
 
-          {/* Digital Readout Box inside Dial */}
           <rect
-            x={cx - 44}
+            x={cx - 52}
             y={cy + 16}
-            width="88"
+            width="104"
             height="36"
             rx="8"
             fill="#090D16"
@@ -280,14 +272,14 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
           />
           <text
             x={cx}
-            y={cy + 35}
+            y={cy + 34}
             textAnchor="middle"
-            fill="#F8FAFC"
-            fontSize="16.5"
+            fill={hasData ? '#F8FAFC' : '#94A3B8'}
+            fontSize={hasData ? '15.5' : '11.5'}
             fontWeight="700"
             fontFamily="JetBrains Mono, monospace"
           >
-            {value.toFixed(decimals)}
+            {hasData ? numericValue.toFixed(decimals) : 'нет данных'}
           </text>
           <text
             x={cx}
@@ -303,11 +295,13 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
         </svg>
       </div>
 
-      {/* Extra Sub-Telemetry Rows */}
       {extraInfo && extraInfo.length > 0 && (
         <div className="relative pt-2.5 border-t border-white/[0.06] grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
           {extraInfo.map((item, idx) => (
-            <div key={idx} className="flex items-center justify-between gap-1 bg-slate-950/40 px-2 py-1 rounded-md border border-white/[0.04]">
+            <div
+              key={idx}
+              className="flex items-center justify-between gap-1 bg-slate-950/40 px-2 py-1 rounded-md border border-white/[0.04]"
+            >
               <span className="text-slate-400 truncate">{item.label}</span>
               <span
                 className={`font-mono font-semibold whitespace-nowrap ${

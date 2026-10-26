@@ -1,8 +1,9 @@
 ; Inno Setup 6 Script for PearlRigControl-Setup.exe
+; Майнер НЕ запускается автоматически при установке или первом открытии
 [Setup]
 AppId={{8F9C2E41-5A7D-4E3B-9C12-7D8E4A2F6B90}
 AppName=Pearl Rig Control (dual4070ti)
-AppVersion=1.3.0
+AppVersion=3.0.0
 AppPublisher=Pearl Rig Control
 DefaultDirName={autopf}\PearlRigControl
 DefaultGroupName=Pearl Rig Control
@@ -23,10 +24,5 @@ Source: "rig-config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "pearl-icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-; Автоматическое создание иконки на Рабочем столе (без лишних галочек)
-Name: "{autodesktop}\Pearl Rig Control"; Filename: "{app}\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"; Comment: "Pearl Rig Control & Mining Launcher (dual4070ti)"
-; Иконка в меню Пуск
+Name: "{autodesktop}\Pearl Rig Control"; Filename: "{app}\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"; Comment: "Pearl Rig Control (dual4070ti) - ручной запуск после сохранения кошелька"
 Name: "{group}\Pearl Rig Control"; Filename: "{app}\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"
-
-[Run]
-Filename: "{app}\pearl_watchdog_agent.bat"; Description: "Launch Pearl Rig Control"; Flags: nowait postinstall skipifsilent shellexec

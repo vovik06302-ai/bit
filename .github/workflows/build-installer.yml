@@ -1,11 +1,9 @@
 name: Build Pearl Rig Installer (.EXE)
 
 on:
-  push:
-    branches: [ "main", "master" ]
-  release:
-    types: [ published, created, prereleased, edited ]
   workflow_dispatch:
+  release:
+    types: [ published, created ]
 
 permissions:
   contents: write
@@ -56,21 +54,3 @@ jobs:
         with:
           name: PearlRigControl-Setup
           path: Output/PearlRigControl-Setup.exe
-
-      - name: Attach PearlRigControl-Setup.exe to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name || format('v1.0.{0}', github.run_number) }}
-          name: ${{ github.event.release.name || format('Pearl Rig Control Installer v1.0.{0}', github.run_number) }}
-          prerelease: false
-          body: |
-            ### Установщик программы Pearl Rig Control (Dual RTX 4070 Ti)
-            1. Скачай и запусти **PearlRigControl-Setup.exe** из блока **Assets** ниже.
-            2. После установки на **Рабочем столе** появится иконка **Pearl Rig Control**.
-            3. В окне программы нажми кнопку **«▶ ЗАПУСТИТЬ МАЙНИНГ»** (программа сама настроит обход INCY VPN и разгон RTX 4070 Ti).
-          files: |
-            Output/PearlRigControl-Setup.exe
-            pearl_watchdog_agent.bat
-            rig-config.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

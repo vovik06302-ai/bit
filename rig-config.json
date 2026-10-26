@@ -5,7 +5,7 @@
   "remoteAutoStartAllowed": false,
   "remoteWalletChangeAllowed": false,
   "workerName": "dual4070ti",
-  "walletAddress": "",
+  "walletAddress": "[REMOVED_LOCAL_WALLET]",
   "primaryPool": "stratum+tcp://prl.kryptex.network:7048",
   "backupPool": "stratum+tcp://prl-eu.kryptex.network:7048",
   "apiPort": 3001,

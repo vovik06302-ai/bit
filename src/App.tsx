@@ -402,10 +402,17 @@ export default function App() {
 
   const handleLocalSession = useCallback((session: any) => {
     if (!session.configured) return;
+    // Синхронизируем браузерное хранилище с закреплённой локальной конфигурацией
+    // агента. Иначе после нового запуска UI снова показывал пустое поле кошелька,
+    // хотя backend уже сохранил адрес.
+    if (typeof session.wallet === 'string' && validatePearlWallet(session.wallet).valid) {
+      localStorage.setItem(STORAGE_WALLET_KEY, JSON.stringify({ address: session.wallet, savedAt: new Date().toISOString(), source: 'local-agent' }));
+    }
     setRigConfig(prev => ({ ...prev, walletAddress:session.wallet, walletSaved:true, primaryPool:session.pool,
       gpus: session.gpus.map((g: any, id: number) => ({ ...prev.gpus[id], ...g })) as [GpuSettings, GpuSettings] }));
     setDraftWallet(session.wallet);
     setIsEditingWallet(false);
+    setConfirmingEditUnlock(false);
   }, []);
 
   // Кнопки «Запустить» и «Стоп»

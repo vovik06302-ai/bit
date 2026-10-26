@@ -96,6 +96,8 @@ export function createPanelServer({ base = home, stateRoot = process.env.PEARL_S
       }
       if (req.method === 'GET' && url.pathname === '/api/earnings') {
         const config = await configRead();
+        const forceRefresh = url.searchParams.get('refresh') === '1';
+        if (forceRefresh) earnings = null;
         if (!earnings || Date.now() - Date.parse(earnings.fetchedAt) >= 60000) {
           if (!earningsPromise) earningsPromise = loadEarnings(config.wallet).then(value => (earnings = value)).finally(() => { earningsPromise = null; });
           try { await earningsPromise; }

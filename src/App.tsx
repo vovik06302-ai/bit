@@ -739,7 +739,7 @@ export default function App() {
         {/* Основная рабочая область */}
         <main className="flex-1 p-6 lg:p-8 space-y-7 overflow-y-auto">
           {(activeTab === 'telemetry' || activeTab === 'overclock') && (
-            <RigControlPanel mode={activeTab === 'telemetry' ? 'overview' : 'settings'} gpus={gpuMetrics} pool={poolStatus} onSession={handleLocalSession} onConfigure={() => setActiveTab('overclock')} />
+            <RigControlPanel mode={activeTab === 'telemetry' ? 'overview' : 'settings'} gpus={gpuMetrics} pool={poolStatus} onSession={handleLocalSession} onConfigure={() => setActiveTab('overclock')} onRefreshTelemetry={pollRealTelemetry} />
           )}
 
           {activeTab === 'diagnostics' && (

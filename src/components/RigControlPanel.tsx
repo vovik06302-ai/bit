@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GpuLiveMetrics, GpuSettings, PoolLiveStatus } from '../types/rig';
 import { SpeedometerGauge } from './SpeedometerGauge';
 
@@ -9,12 +9,13 @@ type Props = {
   pool: PoolLiveStatus;
   onSession: (session: any) => void;
   onConfigure: () => void;
+  onRefreshTelemetry?: () => Promise<void>;
 };
 const prl = (value: unknown) => typeof value === 'number' && Number.isFinite(value)
   ? value.toLocaleString('ru-RU', { minimumFractionDigits: 8, maximumFractionDigits: 8 }) : 'нет данных';
 const metric = (value: number | null, suffix: string) => value === null ? 'нет данных' : value.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + suffix;
 
-export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure }: Props) {
+export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRefreshTelemetry }: Props) {
   const [session, setSession] = useState<any>(null);
   const [draft, setDraft] = useState<Profile[]>([]);
   const [earnings, setEarnings] = useState<any>(null);
@@ -22,6 +23,65 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure }: Pr
   const [minerStatus, setMinerStatus] = useState<any>(null);
   const [error, setError] = useState('');
   const [setup, setSetup] = useState({ wallet:'', minerExe:'C:\\Pearl\\miner\\onezerominer.exe', logFile:'C:\\Pearl\\miner.log' });
+  const [refreshing, setRefreshing] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [rates, setRates] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('pearl_panel_rates_v1') ?? '{}');
+      return { prlRub: typeof saved.prlRub === 'number' ? saved.prlRub : 0, kwhRub: typeof saved.kwhRub === 'number' ? saved.kwhRub : 0 };
+    } catch { return { prlRub: 0, kwhRub: 0 }; }
+  });
+  const [energyKwh, setEnergyKwh] = useState(() => {
+    try { const value = Number(localStorage.getItem('pearl_measured_gpu_kwh_v1')); return Number.isFinite(value) && value >= 0 ? value : 0; }
+    catch { return 0; }
+  });
+  const previousPower = useRef<{ watts: number; at: number } | null>(null);
+  const totalPowerWatts = useMemo(() => {
+    const values = gpus.map(gpu => gpu.powerWatts).filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+  }, [gpus]);
+  const totalPowerKw = totalPowerWatts === null ? null : totalPowerWatts / 1000;
+  const powerCostPerHour = totalPowerKw !== null && rates.kwhRub > 0 ? totalPowerKw * rates.kwhRub : null;
+  const measuredCost = rates.kwhRub > 0 ? energyKwh * rates.kwhRub : null;
+  const confirmedValueRub = rates.prlRub > 0 && typeof earnings?.confirmed === 'number' ? earnings.confirmed * rates.prlRub : null;
+  const balanceValueRub = rates.prlRub > 0 && typeof earnings?.balance === 'number' ? earnings.balance * rates.prlRub : null;
+
+  useEffect(() => { localStorage.setItem('pearl_panel_rates_v1', JSON.stringify(rates)); }, [rates]);
+  useEffect(() => { localStorage.setItem('pearl_measured_gpu_kwh_v1', String(energyKwh)); }, [energyKwh]);
+  useEffect(() => {
+    if (totalPowerWatts === null) { previousPower.current = null; return; }
+    const now = Date.now();
+    const previous = previousPower.current;
+    if (previous) {
+      const seconds = (now - previous.at) / 1000;
+      if (seconds > 0 && seconds <= 300) setEnergyKwh(value => value + (previous.watts * seconds) / 3_600_000);
+    }
+    previousPower.current = { watts: totalPowerWatts, at: now };
+  }, [totalPowerWatts]);
+
+  const refreshAll = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        loadSession(),
+        onRefreshTelemetry?.(),
+        fetch('/api/earnings?refresh=1', { cache: 'no-store' }).then(async response => { const data = await response.json(); if (!response.ok) throw new Error(data.error ?? 'Нет данных о начислениях'); setEarnings(data); }),
+      ]);
+      setError('');
+    } catch (e) { setError((e as Error).message); }
+    finally { setRefreshing(false); }
+  };
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) { await document.exitFullscreen(); setFullscreen(false); }
+      else { await document.documentElement.requestFullscreen(); setFullscreen(true); }
+    } catch (e) { setError(`Полноэкранный режим недоступен: ${(e as Error).message}`); }
+  };
+  useEffect(() => {
+    const update = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', update);
+    return () => document.removeEventListener('fullscreenchange', update);
+  }, []);
   const loadSession = useCallback(async () => {
     const response = await fetch('/api/session', { cache: 'no-store' });
     if (!response.ok) throw new Error('Откройте локальную панель http://127.0.0.1:3000/');
@@ -99,7 +159,9 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure }: Pr
         <h2 className="text-xl font-bold text-white">{mode === 'overview' ? 'Доход и состояние рига' : 'Настройки видеокарт'}</h2>
         <p className="text-xs text-slate-400 mt-1">{session?.configured ? `Выплаты: ${session.wallet}` : 'Подключение к локальному агенту…'}</p>
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
+        <button className={`${button} bg-slate-700 text-white`} disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Обновление…' : 'Обновить данные'}</button>
+        <button className={`${button} bg-slate-700 text-white`} onClick={toggleFullscreen}>{fullscreen ? 'Выйти из полного экрана' : 'Полный экран'}</button>
         <button className={`${button} bg-emerald-500 text-slate-950`} disabled={busy || pool.minerProcessRunning === true} onClick={() => command('start')}>Запустить</button>
         <button className={`${button} bg-rose-600 text-white`} disabled={busy || pool.minerProcessRunning !== true} onClick={() => command('stop')}>Остановить</button>
         {mode === 'overview' && <button className={`${button} bg-slate-700 text-white`} onClick={onConfigure}>Настроить GPU</button>}
@@ -166,6 +228,28 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure }: Pr
           <span>{earnings?.stale ? 'Нет свежих данных · ' : ''}{earnings?.fetchedAt ? `Получено ${new Date(earnings.fetchedAt).toLocaleTimeString('ru-RU')}` : 'Ожидание ответа пула'}</span>
         </div>
         {(earnings?.error || earnings?.partial) && <p className="text-xs text-amber-300">{earnings.error ?? 'Часть данных пула недоступна. Отсутствующие суммы не заменяются нулями.'}</p>}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 border-t border-slate-800 pt-4">
+          <label className="text-xs text-slate-400">Курс PRL, ₽
+            <input type="number" min="0" step="0.000001" value={rates.prlRub || ''} onChange={e => setRates(old => ({ ...old, prlRub: Math.max(0, Number(e.target.value) || 0) }))} className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100 font-mono" placeholder="Введите курс вручную" />
+          </label>
+          <label className="text-xs text-slate-400">Электроэнергия, ₽/кВт·ч
+            <input type="number" min="0" step="0.01" value={rates.kwhRub || ''} onChange={e => setRates(old => ({ ...old, kwhRub: Math.max(0, Number(e.target.value) || 0) }))} className="block w-full mt-1 bg-slate-950 border border-slate-700 rounded p-2 text-slate-100 font-mono" placeholder="Введите тариф" />
+          </label>
+          <div className="rounded-lg bg-slate-950/60 border border-slate-800 p-3 text-xs">
+            <div className="text-slate-400">Подтверждённый заработок по курсу</div>
+            <div className="mt-1 font-mono text-emerald-300">{confirmedValueRub === null ? 'нет курса или данных' : `${confirmedValueRub.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽`}</div>
+            <div className="mt-1 text-[11px] text-slate-500">Баланс с ожиданием: {balanceValueRub === null ? 'нет данных' : `${balanceValueRub.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽`}</div>
+          </div>
+        </div>
+      </section>
+      <section className="p-5 rounded-xl border border-slate-700 bg-[#111827] space-y-3">
+        <h3 className="font-semibold text-white">Электропотребление видеокарт</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+          <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800"><div className="text-xs text-slate-400">GPU сейчас всего</div><b className="font-mono text-slate-100">{totalPowerWatts === null ? 'нет данных' : `${totalPowerWatts.toFixed(1)} Вт (${totalPowerKw?.toFixed(3)} кВт)`}</b></div>
+          <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800"><div className="text-xs text-slate-400">Измерено с этой панели</div><b className="font-mono text-slate-100">{energyKwh.toFixed(4)} кВт·ч</b></div>
+          <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800"><div className="text-xs text-slate-400">Стоимость измеренной энергии</div><b className="font-mono text-slate-100">{measuredCost === null ? 'нет тарифа' : `${measuredCost.toFixed(2)} ₽`}</b><div className="text-[11px] text-slate-500">Сейчас: {powerCostPerHour === null ? 'нет тарифа/мощности' : `${powerCostPerHour.toFixed(2)} ₽/ч`}</div></div>
+        </div>
+        <p className="text-xs text-slate-500">Общая мощность — сумма реальных показаний GPU из nvidia-smi. кВт·ч накапливаются только при доступных измерениях и сохраняются локально в браузере; это не показания счётчика дома.</p>
       </section>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {gpus.map(gpu => <section key={gpu.id} className="p-4 rounded-xl border border-slate-700 bg-[#111827]">
@@ -182,7 +266,7 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure }: Pr
           </div>
         </section>)}
       </div>
-      <p className="text-xs text-slate-400">Пул: {pool.connected === true ? 'Connected' : pool.connected === false ? 'Disconnected' : 'нет данных'} · {pool.poolUrl ?? 'нет данных'} · Датчики обновляются каждые 5 секунд, начисления — раз в минуту.</p>
+      <p className="text-xs text-slate-400">Пул: {pool.connected === true ? 'Connected' : pool.connected === false ? 'Disconnected' : 'нет данных'} · {pool.poolUrl ?? 'нет данных'} · Датчики обновляются каждые 5 секунд, начисления — раз в минуту. Кнопка «Обновить данные» запускает запрос немедленно.</p>
     </>}
 
     {mode === 'settings' && <section className="p-5 rounded-xl border border-slate-700 bg-[#111827] space-y-5">

@@ -1,3 +1,2 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-panel.ps1"
-if errorlevel 1 pause
+start "" "%~dp0pearl_watchdog_agent.bat"

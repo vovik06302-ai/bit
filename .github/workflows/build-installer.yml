@@ -1,15 +1,10 @@
-name: Build Pearl Rig Installer (.EXE)
+name: Build Pearl Rig Control installer
 
 on:
   push:
-    branches: [main, fix/live-telemetry]
+    branches: [main, fix/native-windows-window]
   pull_request:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Existing release tag, for example v1.0.14
-        required: true
-        type: string
   release:
     types: [published]
 
@@ -20,42 +15,25 @@ jobs:
   build-windows-installer:
     runs-on: windows-latest
     steps:
-      - name: Checkout release source
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-
-      - name: Test and build dashboard
+      - name: Prepare PowerShell payload
         shell: pwsh
         run: |
-          npm ci --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
-          npm test
-          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
-          npm run lint
-          if ($LASTEXITCODE -ne 0) { throw 'TypeScript failed' }
-          npm run build
-          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
-          & ./tests/telemetry.Tests.ps1
-          & ./tests/control.Tests.ps1
-          New-Item -ItemType Directory -Path bundle -Force | Out-Null
-          $node = (Get-Command node.exe).Source
-          Copy-Item -LiteralPath $node -Destination bundle/node.exe
-          $version = (& node --version).Trim()
-          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nodejs/node/$version/LICENSE" -OutFile bundle/NODE-LICENSE.txt
+          $source = Get-Content -LiteralPath 'pearl_watchdog_agent.bat' -Raw -Encoding UTF8
+          $marker = ':: ___PS_' + 'START___'
+          $index = $source.IndexOf($marker)
+          if ($index -lt 0) { throw 'Embedded PowerShell payload marker was not found' }
+          $payload = $source.Substring($index + $marker.Length).TrimStart()
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput($payload, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.ToString() }; throw 'PowerShell payload syntax is invalid' }
           $bom = [Text.UTF8Encoding]::new($true)
-          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
-            $text = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8
-            [IO.File]::WriteAllText($_.FullName, $text, $bom)
-          }
+          [IO.File]::WriteAllText('pearl_watchdog_agent.bat', $source, $bom)
 
-      - name: Generate Pearl Desktop Icon (pearl-icon.ico)
+      - name: Generate Pearl desktop icon
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Drawing
@@ -69,28 +47,22 @@ jobs:
           $pearlBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 52, 211, 153))
           $g.FillEllipse($pearlBrush, 20, 20, 24, 24)
           $g.Dispose()
-          $hIcon = $bmp.GetHicon()
-          $icon = [System.Drawing.Icon]::FromHandle($hIcon)
-          $fs = New-Object System.IO.FileStream("pearl-icon.ico", [System.IO.FileMode]::Create)
+          $icon = [System.Drawing.Icon]::FromHandle($bmp.GetHIcon())
+          $fs = New-Object System.IO.FileStream('pearl-icon.ico', [System.IO.FileMode]::Create)
           $icon.Save($fs)
           $fs.Close()
           $bmp.Dispose()
 
-      - name: Prepare UTF-8 BOM and compile installer
+      - name: Compile Windows installer
         shell: pwsh
         run: |
-          $utf8Bom = New-Object System.Text.UTF8Encoding($true)
-          $issContent = Get-Content -LiteralPath "installer.iss" -Raw -Encoding UTF8
-          [System.IO.File]::WriteAllText((Join-Path $PWD "installer.iss"), $issContent, $utf8Bom)
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup -y
-          }
-          & $iscc "installer.iss"
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { choco install innosetup -y }
+          & $iscc 'installer.iss'
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-          if (-not (Test-Path "Output/PearlRigControl-Setup.exe")) { throw "Installer EXE was not created" }
+          if (-not (Test-Path 'Output/PearlRigControl-Setup.exe')) { throw 'Installer EXE was not created' }
 
-      - name: Upload installer as workflow artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: PearlRigControl-Setup
@@ -98,10 +70,9 @@ jobs:
           if-no-files-found: error
 
       - name: Attach installer to GitHub Release
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || github.event.release.tag_name }}
           files: Output/PearlRigControl-Setup.exe
           fail_on_unmatched_files: true
         env:

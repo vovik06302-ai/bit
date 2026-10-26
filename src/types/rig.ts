@@ -75,6 +75,10 @@ export interface PoolLiveStatus {
   sharesAtRestart: number;
   recoveryConfirmed: boolean;
   lastError: string | null;
+  agentVersion?: string | null;
+  updateAvailable?: boolean;
+  latestVersion?: string | null;
+  downloadProgress?: number;
 }
 
 export interface WatchdogEvent {

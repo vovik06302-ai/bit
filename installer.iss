@@ -22,7 +22,13 @@ Name: "default"; MessagesFile: "compiler:Default.isl"
 Source: "pearl_watchdog_agent.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "rig-config.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "pearl-icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Start-Pearl-Rig-Control.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bundle\node.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bundle\NODE-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "scripts\*.mjs"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "scripts\*.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "dist\*"; DestDir: "{app}\dist"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autodesktop}\Pearl Rig Control"; Filename: "{app}\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"; Comment: "Pearl Rig Control (dual4070ti) - ручной запуск после сохранения кошелька"
-Name: "{group}\Pearl Rig Control"; Filename: "{app}\pearl_watchdog_agent.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"
+Name: "{autodesktop}\Pearl Rig Control"; Filename: "{app}\Start-Pearl-Rig-Control.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"; Comment: "Pearl: доход, температуры, состояние и настройки"
+Name: "{group}\Pearl Rig Control"; Filename: "{app}\Start-Pearl-Rig-Control.bat"; WorkingDir: "{app}"; IconFilename: "{app}\pearl-icon.ico"

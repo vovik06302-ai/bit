@@ -58,9 +58,11 @@ $LocalStateDir = "$env:LOCALAPPDATA\PearlRigControl"
 if (-not (Test-Path $LocalStateDir)) { New-Item -ItemType Directory -Path $LocalStateDir -Force | Out-Null }
 $LocalWalletFile = "$LocalStateDir\wallet-local.json"
 
-$Wallet = ""
-$WalletSaved = $false
-$WalletEditMode = $true
+# Публичный адрес кошелька Pearl по умолчанию (только адрес выплат, без секретных ключей)
+$DefaultWallet = "prl1psn90qwn5r86z4rhfaz2tmetf5uhtvcxl82e6xrmv62rka2jvk9dsvs0ayz"
+$Wallet = $DefaultWallet
+$WalletSaved = $true
+$WalletEditMode = $false
 
 # Состояние процесса майнера: НЕ запускаем при установке или первом открытии
 $MiningDesired = $false
@@ -107,9 +109,6 @@ function Test-PearlWalletFormat([string]$Addr) {
         return @{ Valid = $false; Reason = "ОШИБКА: Не вводите seed-фразу или приватный ключ! Нужен только публичный адрес prl1p..." }
     }
     $lower = $clean.ToLowerInvariant()
-    if ($lower -eq "prl1psn90qwn5r86zjvk9dsvs0ayz") {
-        return @{ Valid = $false; Reason = "Обрезанный тестовый адрес (29 симв.) заблокирован. Введите полный 63-символьный адрес." }
-    }
     if ($lower.StartsWith("prl1p")) {
         $body = $lower.Substring(5)
         if ($lower.Length -eq 63 -and ($body -match "^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$")) {

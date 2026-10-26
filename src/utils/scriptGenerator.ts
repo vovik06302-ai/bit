@@ -1,7 +1,10 @@
 import { RigConfig, WatchdogPolicy, LogDiagnosticItem } from '../types/rig';
 
 const BECH32_CHARSET_REGEX = /^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
-const KNOWN_TRUNCATED_SAMPLE = 'prl1psn90qwn5r86zjvk9dsvs0ayz';
+
+// Публичный адрес кошелька Pearl по умолчанию (адрес выплат, без секретных ключей)
+export const DEFAULT_PEARL_WALLET =
+  'prl1psn90qwn5r86z4rhfaz2tmetf5uhtvcxl82e6xrmv62rka2jvk9dsvs0ayz';
 
 export function validatePearlWallet(address: string): {
   valid: boolean;
@@ -37,17 +40,6 @@ export function validatePearlWallet(address: string): {
       expectedLength: 63,
       message:
         'ОШИБКА БЕЗОПАСНОСТИ: Введена мнемоническая фраза или приватный ключ! Программа никогда не запрашивает секретные ключи. Введите только публичный адрес выплат Pearl (prl1p... / prl1q...).',
-    };
-  }
-
-  if (clean.toLowerCase() === KNOWN_TRUNCATED_SAMPLE) {
-    return {
-      valid: false,
-      type: 'truncated_prl',
-      length: clean.length,
-      expectedLength: 63,
-      message:
-        'Заблокирован обрезанный демонстрационный адрес (29 из 63 символов). Введите ваш полный публичный адрес Pearl (63 символа).',
     };
   }
 
@@ -324,9 +316,11 @@ $LocalStateDir = "$env:LOCALAPPDATA\\PearlRigControl"
 if (-not (Test-Path $LocalStateDir)) { New-Item -ItemType Directory -Path $LocalStateDir -Force | Out-Null }
 $LocalWalletFile = "$LocalStateDir\\wallet-local.json"
 
-$Wallet = ""
-$WalletSaved = $false
-$WalletEditMode = $true
+# Публичный адрес кошелька Pearl по умолчанию (только адрес выплат, без секретных ключей)
+$DefaultWallet = "prl1psn90qwn5r86z4rhfaz2tmetf5uhtvcxl82e6xrmv62rka2jvk9dsvs0ayz"
+$Wallet = $DefaultWallet
+$WalletSaved = $true
+$WalletEditMode = $false
 
 # Состояние процесса майнера: НЕ запускаем при установке или первом открытии
 $MiningDesired = $false
@@ -356,6 +350,12 @@ $SharesAcc = $null
 $SharesRej = $null
 $Gpu0Temp = $null
 $Gpu1Temp = $null
+$Gpu0HotspotTemp = $null
+$Gpu1HotspotTemp = $null
+$Gpu0VramTemp = $null
+$Gpu1VramTemp = $null
+$Gpu0FanRpm = $null
+$Gpu1FanRpm = $null
 $Gpu0Power = $null
 $Gpu1Power = $null
 $Gpu0Fan = $null
@@ -374,9 +374,6 @@ function Test-PearlWalletFormat([string]$Addr) {
         return @{ Valid = $false; Reason = "ОШИБКА: Не вводите seed-фразу или приватный ключ! Нужен только публичный адрес prl1p..." }
     }
     $lower = $clean.ToLowerInvariant()
-    if ($lower -eq "prl1psn90qwn5r86zjvk9dsvs0ayz") {
-        return @{ Valid = $false; Reason = "Обрезанный тестовый адрес (29 симв.) заблокирован. Введите полный 63-символьный адрес." }
-    }
     if ($lower.StartsWith("prl1p")) {
         $body = $lower.Substring(5)
         if ($lower.Length -eq 63 -and ($body -match "^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$")) {
@@ -695,13 +692,16 @@ function Poll-RealTelemetry {
     # 3. Опрос nvidia-smi для температур, мощности и вентиляторов
     $script:NvmlAvailable = $false
     $script:Gpu0Temp = $null; $script:Gpu1Temp = $null
+    $script:Gpu0HotspotTemp = $null; $script:Gpu1HotspotTemp = $null
+    $script:Gpu0VramTemp = $null; $script:Gpu1VramTemp = $null
+    $script:Gpu0FanRpm = $null; $script:Gpu1FanRpm = $null
     $script:Gpu0Power = $null; $script:Gpu1Power = $null
     $script:Gpu0Fan = $null; $script:Gpu1Fan = $null
     $script:Gpu0CClkNow = $null; $script:Gpu1CClkNow = $null
     $script:Gpu0MClkNow = $null; $script:Gpu1MClkNow = $null
 
     try {
-        $smiOut = & nvidia-smi --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory --format=csv,noheader,nounits 2>$null
+        $smiOut = & nvidia-smi --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory,temperature.hotspot,temperature.memory,fan.speed.rpm --format=csv,noheader,nounits 2>$null
         if ($LASTEXITCODE -eq 0 -and $smiOut) {
             $lines = @($smiOut -split "\`r?\`n" | Where-Object { $_.Trim() -ne "" })
             if ($lines.Count -ge 1) {
@@ -711,30 +711,77 @@ function Poll-RealTelemetry {
                     if ($parts.Count -ge 6) {
                         $idx = [int]($parts[0].Trim())
                         $tVal = 0; $pVal = 0.0; $fVal = 0; $ccVal = 0; $mcVal = 0
+                        $hsVal = 0; $vmVal = 0; $rpmVal = 0
                         $tOk = [int]::TryParse($parts[1].Trim(), [ref]$tVal)
                         $pOk = [double]::TryParse(($parts[2].Trim() -replace ",", "."), [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$pVal)
                         $fOk = [int]::TryParse($parts[3].Trim(), [ref]$fVal)
                         $ccOk = [int]::TryParse($parts[4].Trim(), [ref]$ccVal)
                         $mcOk = [int]::TryParse($parts[5].Trim(), [ref]$mcVal)
+                        $hsOk = $parts.Count -ge 7 -and [int]::TryParse($parts[6].Trim(), [ref]$hsVal)
+                        $vmOk = $parts.Count -ge 8 -and [int]::TryParse($parts[7].Trim(), [ref]$vmVal)
+                        $rpmOk = $parts.Count -ge 9 -and [int]::TryParse($parts[8].Trim(), [ref]$rpmVal)
                         if ($idx -eq 0) {
                             if ($tOk) { $script:Gpu0Temp = $tVal }
                             if ($pOk) { $script:Gpu0Power = [Math]::Round($pVal, 1) }
                             if ($fOk) { $script:Gpu0Fan = $fVal }
                             if ($ccOk) { $script:Gpu0CClkNow = $ccVal }
                             if ($mcOk) { $script:Gpu0MClkNow = $mcVal }
+                            if ($hsOk) { $script:Gpu0HotspotTemp = $hsVal }
+                            if ($vmOk) { $script:Gpu0VramTemp = $vmVal }
+                            if ($rpmOk) { $script:Gpu0FanRpm = $rpmVal }
                         } elseif ($idx -eq 1) {
                             if ($tOk) { $script:Gpu1Temp = $tVal }
                             if ($pOk) { $script:Gpu1Power = [Math]::Round($pVal, 1) }
                             if ($fOk) { $script:Gpu1Fan = $fVal }
                             if ($ccOk) { $script:Gpu1CClkNow = $ccVal }
                             if ($mcOk) { $script:Gpu1MClkNow = $mcVal }
+                            if ($hsOk) { $script:Gpu1HotspotTemp = $hsVal }
+                            if ($vmOk) { $script:Gpu1VramTemp = $vmVal }
+                            if ($rpmOk) { $script:Gpu1FanRpm = $rpmVal }
                         }
                     }
                 }
             }
         }
     } catch {
-        $script:NvmlAvailable = $false
+        # Старые версии драйверов не поддерживают temperature.hotspot / temperature.memory / fan.speed.rpm —
+        # повторяем опрос базовым набором полей, чтобы датчики температуры ядра работали всегда.
+        try {
+            $smiOut = & nvidia-smi --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory --format=csv,noheader,nounits 2>$null
+            if ($LASTEXITCODE -eq 0 -and $smiOut) {
+                $lines = @($smiOut -split "\`r?\`n" | Where-Object { $_.Trim() -ne "" })
+                if ($lines.Count -ge 1) {
+                    $script:NvmlAvailable = $true
+                    foreach ($line in $lines) {
+                        $parts = $line -split ","
+                        if ($parts.Count -ge 6) {
+                            $idx = [int]($parts[0].Trim())
+                            $tVal = 0; $pVal = 0.0; $fVal = 0; $ccVal = 0; $mcVal = 0
+                            $tOk = [int]::TryParse($parts[1].Trim(), [ref]$tVal)
+                            $pOk = [double]::TryParse(($parts[2].Trim() -replace ",", "."), [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$pVal)
+                            $fOk = [int]::TryParse($parts[3].Trim(), [ref]$fVal)
+                            $ccOk = [int]::TryParse($parts[4].Trim(), [ref]$ccVal)
+                            $mcOk = [int]::TryParse($parts[5].Trim(), [ref]$mcVal)
+                            if ($idx -eq 0) {
+                                if ($tOk) { $script:Gpu0Temp = $tVal }
+                                if ($pOk) { $script:Gpu0Power = [Math]::Round($pVal, 1) }
+                                if ($fOk) { $script:Gpu0Fan = $fVal }
+                                if ($ccOk) { $script:Gpu0CClkNow = $ccVal }
+                                if ($mcOk) { $script:Gpu0MClkNow = $mcVal }
+                            } elseif ($idx -eq 1) {
+                                if ($tOk) { $script:Gpu1Temp = $tVal }
+                                if ($pOk) { $script:Gpu1Power = [Math]::Round($pVal, 1) }
+                                if ($fOk) { $script:Gpu1Fan = $fVal }
+                                if ($ccOk) { $script:Gpu1CClkNow = $ccVal }
+                                if ($mcOk) { $script:Gpu1MClkNow = $mcVal }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {
+            $script:NvmlAvailable = $false
+        }
     }
 
     Update-TelemetryDisplay
@@ -1046,6 +1093,9 @@ $timer.Add_Tick({
                                     id = 0
                                     hashrateMHs = $script:Gpu0Hash
                                     tempC = $script:Gpu0Temp
+                                    hotspotTempC = $script:Gpu0HotspotTemp
+                                    vramTempC = $script:Gpu0VramTemp
+                                    fanRpm = $script:Gpu0FanRpm
                                     powerWatts = $script:Gpu0Power
                                     fanPercent = $script:Gpu0Fan
                                     cclkMHz = $script:Gpu0CClkNow
@@ -1055,6 +1105,9 @@ $timer.Add_Tick({
                                     id = 1
                                     hashrateMHs = $script:Gpu1Hash
                                     tempC = $script:Gpu1Temp
+                                    hotspotTempC = $script:Gpu1HotspotTemp
+                                    vramTempC = $script:Gpu1VramTemp
+                                    fanRpm = $script:Gpu1FanRpm
                                     powerWatts = $script:Gpu1Power
                                     fanPercent = $script:Gpu1Fan
                                     cclkMHz = $script:Gpu1CClkNow

@@ -39,6 +39,14 @@ $EmergencyPL = 125
 $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
+# Текущая версия агента и канал проверки обновлений (GitHub Releases)
+$AppVersion = "3.1.0"
+$UpdateRepo = "pearl-miner/pearl-rig-control"
+$script:LatestVersion = $null
+$script:UpdateAvailable = $false
+$script:DownloadActive = $false
+$script:DownloadProgress = 0
+
 # Профиль для двух RTX 4070 Ti (без повышения напряжения):
 # PL 150 W, память 810 MHz, ядро 2400 MHz, kernel 2, кулер GPU0=65%, GPU1=* (авто)
 $CurrentCClk = "2400,2400"
@@ -52,9 +60,11 @@ $LocalStateDir = "$env:LOCALAPPDATA\PearlRigControl"
 if (-not (Test-Path $LocalStateDir)) { New-Item -ItemType Directory -Path $LocalStateDir -Force | Out-Null }
 $LocalWalletFile = "$LocalStateDir\wallet-local.json"
 
-$Wallet = ""
-$WalletSaved = $false
-$WalletEditMode = $true
+# Публичный адрес кошелька Pearl по умолчанию (только адрес выплат, без секретных ключей)
+$DefaultWallet = "prl1psn90qwn5r86z4rhfaz2tmetf5uhtvcxl82e6xrmv62rka2jvk9dsvs0ayz"
+$Wallet = $DefaultWallet
+$WalletSaved = $true
+$WalletEditMode = $false
 
 # Состояние процесса майнера: НЕ запускаем при установке или первом открытии
 $MiningDesired = $false
@@ -194,9 +204,6 @@ function Test-PearlWalletFormat([string]$Addr) {
         return @{ Valid = $false; Reason = "ОШИБКА: Не вводите seed-фразу или приватный ключ! Нужен только публичный адрес prl1p..." }
     }
     $lower = $clean.ToLowerInvariant()
-    if ($lower -eq "prl1psn90qwn5r86zjvk9dsvs0ayz") {
-        return @{ Valid = $false; Reason = "Обрезанный тестовый адрес (29 симв.) заблокирован. Введите полный 63-символьный адрес." }
-    }
     if ($lower.StartsWith("prl1p")) {
         $body = $lower.Substring(5)
         if ($lower.Length -eq 63 -and ($body -match "^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$")) {
@@ -350,13 +357,231 @@ $btnRefreshNow.Location = New-Object System.Drawing.Point(410, 170)
 $btnRefreshNow.Size = New-Object System.Drawing.Size(280, 38)
 $form.Controls.Add($btnRefreshNow)
 
+# БЛОК 2b: Обновление агента (версия, проверка, огненная шкала загрузки)
+$lblVersion = New-Object System.Windows.Forms.Label
+$lblVersion.Text = "Версия агента: v$AppVersion"
+$lblVersion.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+$lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+$lblVersion.Location = New-Object System.Drawing.Point(700, 178)
+$lblVersion.Size = New-Object System.Drawing.Size(200, 22)
+$form.Controls.Add($lblVersion)
+
+$btnCheckUpdate = New-Object System.Windows.Forms.Button
+$btnCheckUpdate.Text = "Проверить обновления"
+$btnCheckUpdate.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
+$btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+$btnCheckUpdate.FlatStyle = "Flat"
+$btnCheckUpdate.Location = New-Object System.Drawing.Point(905, 174)
+$btnCheckUpdate.Size = New-Object System.Drawing.Size(180, 30)
+$form.Controls.Add($btnCheckUpdate)
+
+$lblUpdateInfo = New-Object System.Windows.Forms.Label
+$lblUpdateInfo.Text = ""
+$lblUpdateInfo.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+$lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+$lblUpdateInfo.Location = New-Object System.Drawing.Point(20, 214)
+$lblUpdateInfo.Size = New-Object System.Drawing.Size(1065, 20)
+$form.Controls.Add($lblUpdateInfo)
+
+$pbarDownload = New-Object System.Windows.Forms.ProgressBar
+$pbarDownload.Style = "Continuous"
+$pbarDownload.Minimum = 0
+$pbarDownload.Maximum = 100
+$pbarDownload.Value = 0
+$pbarDownload.Visible = $false
+$pbarDownload.Location = New-Object System.Drawing.Point(20, 238)
+$pbarDownload.Size = New-Object System.Drawing.Size(1065, 18)
+$form.Controls.Add($pbarDownload)
+
+$script:updateLayer = $null
+$script:updateTimer = $null
+
+function Start-FireProgressBar {
+    if ($script:updateLayer -and -not $script:updateLayer.IsDisposed) { return }
+    $layer = New-Object System.Windows.Forms.Panel
+    $layer.Location = $pbarDownload.Location
+    $layer.Size = $pbarDownload.Size
+    $layer.BackColor = [System.Drawing.Color]::Transparent
+    $pbarDownload.Parent.Controls.Add($layer)
+    $layer.BringToFront()
+    $script:updateLayer = $layer
+
+    $tm = New-Object System.Windows.Forms.Timer
+    $tm.Interval = 80
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $tm.Add_Tick({
+        if (-not $script:updateLayer -or $script:updateLayer.IsDisposed) { $tm.Stop(); return }
+        $g = $script:updateLayer.CreateGraphics()
+        try {
+            $g.Clear([System.Drawing.Color]::Transparent)
+            $w = $script:updateLayer.Width
+            $h = $script:updateLayer.Height
+            $frac = $pbarDownload.Value / 100.0
+            $fillW = [int]($w * $frac)
+            if ($fillW -gt 2) {
+                $cols = @([System.Drawing.Color]::FromArgb(255, 220, 38, 38), [System.Drawing.Color]::FromArgb(255, 249, 115, 22), [System.Drawing.Color]::FromArgb(255, 251, 191, 36))
+                $segW = [Math]::Max(6, [int]($fillW / 24))
+                $x = 0
+                $ci = 0
+                while ($x -lt $fillW) {
+                    $brush = New-Object System.Drawing.SolidBrush($cols[$ci % 3])
+                    $g.FillRectangle($brush, $x, 0, [Math]::Min($segW, $fillW - $x), $h)
+                    $brush.Dispose()
+                    $x += $segW
+                    $ci++
+                }
+                $flicker = [System.Drawing.Color]::FromArgb(255, 254, 240, 138)
+                if (((Get-Date).Millisecond -band 1) -eq 0) {
+                    $fb = New-Object System.Drawing.SolidBrush($flicker)
+                    $g.FillRectangle($fb, [Math]::Max(0, $fillW - 6), 0, 6, $h)
+                    $fb.Dispose()
+                }
+            }
+            $txt = "$($pbarDownload.Value)% · v$AppVersion -> v$($script:LatestVersion)"
+            $fmt = New-Object System.Drawing.StringFormat
+            $fmt.Alignment = "Center"
+            $rect = New-Object System.Drawing.RectangleF(0, 0, $w, $h)
+            $g.DrawString($txt, $script:updateLayer.Font, [System.Drawing.Brushes]::White, $rect, $fmt)
+            $fmt.Dispose()
+        } finally {
+            $g.Dispose()
+        }
+        if ($sw.Elapsed.TotalSeconds -gt 1.5) {
+            $script:updateLayer.Invalidate()
+            $pbarDownload.Invalidate()
+            $sw.Restart()
+        }
+    })
+    $script:updateTimer = $tm
+    $tm.Start()
+}
+
+function Stop-FireProgressBar {
+    if ($script:updateTimer) { $script:updateTimer.Stop(); $script:updateTimer.Dispose(); $script:updateTimer = $null }
+    if ($script:updateLayer -and -not $script:updateLayer.IsDisposed) {
+        $script:updateLayer.Visible = $false
+        $script:updateLayer.Dispose()
+    }
+    $script:updateLayer = $null
+}
+
+function Get-GitHubLatestRelease {
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" -Method Get -TimeoutSec 8 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
+        $tag = [string]$rel.tag_name
+        $ver = $tag -replace "^[vV]", ""
+        $assetUrl = $null
+        foreach ($a in $rel.assets) {
+            if ($a.name -like "*PearlRigControl-Setup*") { $assetUrl = [string]$a.browser_download_url; break }
+        }
+        if (-not $assetUrl -and $rel.assets.Count -gt 0) { $assetUrl = [string]$rel.assets[0].browser_download_url }
+        return @{ Version = $ver; Url = $assetUrl }
+    } catch {
+        return $null
+    }
+}
+
+function Test-UpdateAvailable {
+    $latest = Get-GitHubLatestRelease
+    if (-not $latest -or -not $latest.Version) {
+        Write-AgentLog "WARN" "Не удалось получить информацию о последней версии агента (нет доступа к GitHub Releases)."
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "Обновления: нет связи с GitHub Releases — повторите позже."
+        return
+    }
+    $script:LatestVersion = $latest.Version
+    try {
+        $cur = [System.Version]$AppVersion
+        $new = [System.Version]$latest.Version
+        $script:UpdateAvailable = ($new -gt $cur)
+    } catch {
+        $script:UpdateAvailable = ($latest.Version -ne $AppVersion)
+    }
+    if ($script:UpdateAvailable) {
+        $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+        $lblVersion.Text = "Версия агента: v$AppVersion → доступна v$($latest.Version)"
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
+        $lblUpdateInfo.Text = "ОБНАРУЖЕНА НОВАЯ ВЕРСИЯ: v$($latest.Version). Нажмите «Скачать v$($latest.Version)»."
+        $btnCheckUpdate.Text = "Скачать v$($latest.Version)"
+        $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(234, 88, 12)
+        $btnCheckUpdate.ForeColor = [System.Drawing.Color]::White
+        Write-AgentLog "OK" "Обнаружена новая версия агента: v$($latest.Version) (текущая v$AppVersion)."
+    } else {
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+        $lblUpdateInfo.Text = "Обновления: ваша версия v$AppVersion актуальна (последняя release: v$($latest.Version))."
+        Write-AgentLog "INFO" "Проверка обновлений: установлена актуальная версия v$AppVersion."
+    }
+}
+
+function Start-AgentUpdateDownload {
+    if ($script:DownloadActive) { return }
+    $latest = Get-GitHubLatestRelease
+    if (-not $latest -or -not $latest.Url) {
+        Write-AgentLog "ERROR" "Не найден файл установки для скачивания в последнем релизе."
+        return
+    }
+    $script:DownloadActive = $true
+    $script:DownloadProgress = 0
+    $pbarDownload.Value = 0
+    $pbarDownload.Visible = $true
+    Start-FireProgressBar
+    $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
+    $lblUpdateInfo.Text = "Загрузка v$($latest.Version)... 0%"
+    $btnCheckUpdate.Enabled = $false
+    Write-AgentLog "INFO" "Начата загрузка новой версии агента v$($latest.Version): $($latest.Url)"
+
+    $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) "PearlRigControl-Setup-$($latest.Version).exe"
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($latest.Url)
+        $req.UserAgent = "PearlRigControl"
+        $req.AllowAutoRedirect = $true
+        $resp = $req.GetResponse()
+        $total = [int]$resp.ContentLength
+        if ($total -lt 1) { $total = 25000000 }
+        $inStream = $resp.GetResponseStream()
+        $outStream = [System.IO.File]::Create($tmpFile)
+        $buffer = New-Object byte[] 65536
+        $done = 0
+        while ($true) {
+            $read = $inStream.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { break }
+            $outStream.Write($buffer, 0, $read)
+            $done += $read
+            $pct = [Math]::Min(100, [int](($done * 100.0) / $total))
+            $pbarDownload.Value = $pct
+            $script:DownloadProgress = $pct
+            $lblUpdateInfo.Text = "Загрузка v$($latest.Version)... $pct% ($([Math]::Round($done/1MB, 1)) МБ из $([Math]::Round($total/1MB, 1)) МБ)"
+        }
+        $outStream.Close(); $inStream.Close(); $resp.Close()
+        Stop-FireProgressBar
+        $pbarDownload.Visible = $false
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+        $lblUpdateInfo.Text = "Загрузка v$($latest.Version) завершена (100%). Установщик сохранён: $tmpFile"
+        Write-AgentLog "OK" "Новая версия v$($latest.Version) загружена в $tmpFile. Для обновления запустите установщик."
+        $confirm = [System.Windows.Forms.MessageBox]::Show("Установка v$($latest.Version) успешно загружена.`n`nЗапустить установщик прямо сейчас?", "Обновление готово", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($confirm -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Start-Process -FilePath $tmpFile
+        }
+    } catch {
+        Stop-FireProgressBar
+        $pbarDownload.Visible = $false
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "Ошибка загрузки обновления: $($_.Exception.Message)"
+        Write-AgentLog "ERROR" "Сбой при загрузке обновления: $($_.Exception.Message)"
+    } finally {
+        $script:DownloadActive = $false
+        $btnCheckUpdate.Enabled = $true
+    }
+}
+
 # БЛОК 3: Карточки реальной телеметрии (без выдуманных чисел)
 $lblTelemetryBox = New-Object System.Windows.Forms.Label
 $lblTelemetryBox.Font = New-Object System.Drawing.Font("Consolas", 9.5)
 $lblTelemetryBox.BackColor = [System.Drawing.Color]::FromArgb(15, 23, 42)
 $lblTelemetryBox.ForeColor = [System.Drawing.Color]::FromArgb(226, 232, 240)
 $lblTelemetryBox.BorderStyle = "FixedSingle"
-$lblTelemetryBox.Location = New-Object System.Drawing.Point(20, 218)
+$lblTelemetryBox.Location = New-Object System.Drawing.Point(20, 264)
 $lblTelemetryBox.Size = New-Object System.Drawing.Size(1065, 280)
 $lblTelemetryBox.Padding = New-Object System.Windows.Forms.Padding(12)
 $form.Controls.Add($lblTelemetryBox)
@@ -696,6 +921,18 @@ $btnStart.Add_Click({ Start-MinerProcess -IsWatchdogRestart $false })
 $btnStop.Add_Click({ Stop-MinerProcess "Явная остановка пользователем (кнопка Стоп)" })
 $btnRefreshNow.Add_Click({ Poll-RealTelemetry })
 
+# Кнопка обновлений: без новой версии — повторная проверка; с новой версией — загрузка с огненной шкалой
+$btnCheckUpdate.Add_Click({
+    if ($script:DownloadActive) { return }
+    if ($script:UpdateAvailable -and $script:LatestVersion) {
+        Start-AgentUpdateDownload
+    } else {
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+        $lblUpdateInfo.Text = "Проверка обновлений на GitHub Releases..."
+        Test-UpdateAvailable
+    }
+})
+
 $existingOnOpen = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($existingOnOpen) {
     $script:IsMiningRunning = $true
@@ -719,6 +956,7 @@ if ($ReadOnly) {
     $lblWalletHint.Text = "Режим мониторинга: настройки и работа майнера не изменяются."
 }
 Poll-RealTelemetry
+Test-UpdateAvailable
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000

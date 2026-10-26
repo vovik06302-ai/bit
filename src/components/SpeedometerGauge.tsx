@@ -11,7 +11,7 @@ export interface SpeedometerGaugeProps {
   criticalThreshold?: number;
   decimals?: number;
   size?: 'sm' | 'md' | 'lg';
-  accent?: 'emerald' | 'cyan' | 'amber' | 'violet';
+  accent?: 'emerald' | 'cyan' | 'amber' | 'violet' | 'fire';
   extraInfo?: Array<{ label: string; value: string; highlight?: 'ok' | 'warn' | 'err' }>;
 }
 
@@ -78,6 +78,7 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
     cyan: { main: '#06B6D4', bright: '#22D3EE', glow: 'rgba(6,182,212,0.35)' },
     amber: { main: '#F59E0B', bright: '#FBBF24', glow: 'rgba(245,158,11,0.35)' },
     violet: { main: '#8B5CF6', bright: '#A78BFA', glow: 'rgba(139,92,246,0.35)' },
+    fire: { main: '#F97316', bright: '#FB923C', glow: 'rgba(249,115,22,0.4)' },
   }[accent];
 
   const statusColor = !hasData

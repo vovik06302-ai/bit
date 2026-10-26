@@ -1,5 +1,5 @@
 import { ScenarioCheckResult, GpuLiveMetrics, PoolLiveStatus } from '../types/rig';
-import { validatePearlWallet } from './scriptGenerator';
+import { validatePearlWallet, DEFAULT_PEARL_WALLET } from './scriptGenerator';
 
 export interface WatchdogStateInput {
   walletAddress: string;
@@ -359,10 +359,13 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
     !s3Reopen.miningActive;
 
   // 4. Неверный адрес (обрезанный адрес из старого конфига, seed-фраза, приватный ключ)
+  const vDefaultWallet = validatePearlWallet(DEFAULT_PEARL_WALLET);
   const vTruncated = validatePearlWallet('prl1psn90qwn5r86zjvk9dsvs0ayz');
   const vSeed = validatePearlWallet('abandon ability able about above absent absorb abstract absurd abuse access accident');
   const vPrivKey = validatePearlWallet('0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318');
   const check4Passed =
+    vDefaultWallet.valid &&
+    vDefaultWallet.type === 'prl1p_taproot' &&
     !vTruncated.valid &&
     vTruncated.type === 'truncated_prl' &&
     !vSeed.valid &&
@@ -605,11 +608,11 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
     },
     {
       id: 'invalid-or-secret-wallet',
-      title: '4. Неверный адрес / обрезанный адрес / seed-фраза',
+      title: '4. Кошелёк по умолчанию / обрезанный адрес / seed-фраза',
       passed: check4Passed,
-      expected: 'Обрезанный prl1psn90qwn5r86zjvk9dsvs0ayz, seed-фраза и приватный ключ отклоняются, запуск заблокирован',
+      expected: 'Полный адрес prl1psn90qwn5r86z4rhfaz2tmetf5uhtvcxl82e6xrmv62rka2jvk9dsvs0ayz принимается; обрезанный prl1psn90qwn5r86zjvk9dsvs0ayz, seed-фраза и приватный ключ отклоняются',
       actual: check4Passed
-        ? 'Обрезанный адрес (29 симв.) и секретные фразы заблокированы валидатором'
+        ? 'Кошелёк по умолчанию (63 симв.) валиден; обрезанный адрес (29 симв.) и секретные фразы заблокированы валидатором'
         : 'Ошибка блокировки неверного адреса',
     },
     {

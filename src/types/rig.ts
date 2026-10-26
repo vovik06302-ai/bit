@@ -26,7 +26,7 @@ export interface RigConfig {
 
 export interface WatchdogPolicy {
   checkIntervalSec: number;
-  minHashrateMHs: number;
+  minHashrateTHs: number;
   zeroHashrateRestartSec: number;
   maxRestartAttempts: number;
   maxTempC: number;
@@ -40,7 +40,7 @@ export interface WatchdogPolicy {
 export interface GpuLiveMetrics {
   id: number;
   name: string;
-  hashrateMHs: number | null;
+  hashrateTHs: number | null;
   acceptedShares: number | null;
   rejectedShares: number | null;
   staleShares: number | null;
@@ -51,7 +51,7 @@ export interface GpuLiveMetrics {
   fanPercent: number | null;
   fanRpm: number | null;
   powerWatts: number | null;
-  efficiencyHW: number | null;
+  efficiencyGHW: number | null;
   cclkMHz: number | null;
   mclkMHz: number | null;
   voltageMv: number | null;

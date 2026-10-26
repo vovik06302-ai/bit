@@ -1,3 +1,5 @@
+import { RigControlPanel } from './components/RigControlPanel';
+import { parseMinerTelemetry, gpuFromTelemetry, numberOrNull } from './utils/telemetry';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Download,
@@ -23,6 +25,7 @@ import {
   RigConfig,
   WatchdogPolicy,
   GpuLiveMetrics,
+  GpuSettings,
   PoolLiveStatus,
   WatchdogEvent,
 } from './types/rig';
@@ -55,7 +58,7 @@ function formatMetric(value: number | string | null | undefined, suffix = ''): s
   if (typeof value === 'number' && !Number.isFinite(value)) {
     return 'нет данных';
   }
-  return `${value}${suffix}`;
+  return `${typeof value === 'number' ? value.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : value}${suffix}`;
 }
 
 export default function App() {
@@ -87,7 +90,7 @@ export default function App() {
       walletAddress: initialSavedWallet,
       walletSaved: Boolean(initialSavedWallet),
       workerName: 'dual4070ti',
-      primaryPool: 'stratum+tcp://prl.kryptex.network:7048',
+      primaryPool: 'stratum+tcp://prl-ru.kryptex.network:7048',
       backupPool: 'stratum+tcp://prl-eu.kryptex.network:7048',
       apiPort: 3001,
       agentBridgePort: 3002,
@@ -142,7 +145,7 @@ export default function App() {
   const [policy, setPolicy] = useState<WatchdogPolicy>(() => {
     const defaults: WatchdogPolicy = {
       checkIntervalSec: 15,
-      minHashrateMHs: 100,
+      minHashrateTHs: 100,
       zeroHashrateRestartSec: 90,
       maxRestartAttempts: 3,
       maxTempC: 85,
@@ -264,215 +267,43 @@ export default function App() {
   // 1) Локальный агент 127.0.0.1:3002/telemetry (отдаёт данные API OneZeroMiner :3001 + nvidia-smi)
   // 2) Прямой опрос API OneZeroMiner 127.0.0.1:3001 (если запущен только майнер)
   // Если недоступно — выставляет null («нет данных»)
+  const [totals, setTotals] = useState<{ hash: number | null; accepted: number | null; rejected: number | null }>({ hash: null, accepted: null, rejected: null });
+  const [lastSampleAt, setLastSampleAt] = useState<string | null>(null);
   const pollRealTelemetry = useCallback(async () => {
-    let bridgeOk = false;
-    try {
+    const fetchJson = async (url: string) => {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 1500);
-      const res = await fetch(`http://127.0.0.1:${rigConfig.agentBridgePort}/telemetry`, {
-        method: 'GET',
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-
-      if (res.ok) {
-        const data = await res.json();
-        bridgeOk = true;
-        const g0 = Array.isArray(data.gpus) ? data.gpus[0] : null;
-        const g1 = Array.isArray(data.gpus) ? data.gpus[1] : null;
-
-        setPoolStatus({
-          connected: typeof data.poolConnected === 'boolean' ? data.poolConnected : null,
-          poolUrl: data.poolUrl || null,
-          pingMs: typeof data.pingMs === 'number' ? data.pingMs : null,
-          uptimeSec: typeof data.uptimeSec === 'number' ? data.uptimeSec : null,
-          apiAvailable: Boolean(data.apiAvailable),
-          nvmlAvailable: Boolean(data.nvmlAvailable),
-          minerProcessRunning:
-            typeof data.minerProcessRunning === 'boolean' ? data.minerProcessRunning : null,
-          minerPid: typeof data.minerPid === 'number' ? data.minerPid : null,
-          reconnectStage: data.reconnectStage || 'idle',
-          restartAttempts: Number(data.restartAttempts) || 0,
-          sharesAtRestart: Number(data.sharesAtRestart) || 0,
-          recoveryConfirmed: Boolean(data.recoveryConfirmed),
-          lastError: data.lastError || null,
-        });
-
-        // Если обнаружен уже работающий OneZeroMiner при открытии — не останавливаем его
-        if (data.minerProcessRunning === true && !rigConfig.userStoppedManually) {
-          setRigConfig((prev) =>
-            prev.miningActive ? prev : { ...prev, miningActive: true }
-          );
-        }
-
-        setGpuMetrics([
-          {
-            id: 0,
-            name: 'NVIDIA GeForce RTX 4070 Ti',
-            hashrateMHs: typeof g0?.hashrateMHs === 'number' ? g0.hashrateMHs : null,
-            acceptedShares:
-              typeof data.acceptedShares === 'number' ? data.acceptedShares : null,
-            rejectedShares:
-              typeof data.rejectedShares === 'number' ? data.rejectedShares : null,
-            staleShares: null,
-            lastShareSec: null,
-            tempC: typeof g0?.tempC === 'number' ? g0.tempC : null,
-            hotspotTempC: null,
-            vramTempC: null,
-            fanPercent: typeof g0?.fanPercent === 'number' ? g0.fanPercent : null,
-            fanRpm: null,
-            powerWatts: typeof g0?.powerWatts === 'number' ? g0.powerWatts : null,
-            efficiencyHW:
-              typeof g0?.hashrateMHs === 'number' &&
-              typeof g0?.powerWatts === 'number' &&
-              g0.powerWatts > 0
-                ? Number((g0.hashrateMHs / g0.powerWatts).toFixed(2))
-                : null,
-            cclkMHz: typeof g0?.cclkMHz === 'number' ? g0.cclkMHz : null,
-            mclkMHz: typeof g0?.mclkMHz === 'number' ? g0.mclkMHz : null,
-            voltageMv: null,
-            vramUsedMb: null,
-            pState: null,
-            pcieLink: null,
-            status:
-              typeof g0?.tempC === 'number' && g0.tempC >= policy.maxTempC
-                ? 'critical'
-                : typeof g0?.hashrateMHs === 'number' || typeof g0?.tempC === 'number'
-                ? 'nominal'
-                : 'no_data',
-          },
-          {
-            id: 1,
-            name: 'NVIDIA GeForce RTX 4070 Ti',
-            hashrateMHs: typeof g1?.hashrateMHs === 'number' ? g1.hashrateMHs : null,
-            acceptedShares: null,
-            rejectedShares: null,
-            staleShares: null,
-            lastShareSec: null,
-            tempC: typeof g1?.tempC === 'number' ? g1.tempC : null,
-            hotspotTempC: null,
-            vramTempC: null,
-            fanPercent: typeof g1?.fanPercent === 'number' ? g1.fanPercent : null,
-            fanRpm: null,
-            powerWatts: typeof g1?.powerWatts === 'number' ? g1.powerWatts : null,
-            efficiencyHW:
-              typeof g1?.hashrateMHs === 'number' &&
-              typeof g1?.powerWatts === 'number' &&
-              g1.powerWatts > 0
-                ? Number((g1.hashrateMHs / g1.powerWatts).toFixed(2))
-                : null,
-            cclkMHz: typeof g1?.cclkMHz === 'number' ? g1.cclkMHz : null,
-            mclkMHz: typeof g1?.mclkMHz === 'number' ? g1.mclkMHz : null,
-            voltageMv: null,
-            vramUsedMb: null,
-            pState: null,
-            pcieLink: null,
-            status:
-              typeof g1?.tempC === 'number' && g1.tempC >= policy.maxTempC
-                ? 'critical'
-                : typeof g1?.hashrateMHs === 'number' || typeof g1?.tempC === 'number'
-                ? 'nominal'
-                : 'no_data',
-          },
-        ]);
-        return;
-      }
-    } catch {
-      bridgeOk = false;
-    }
-
-    // Если мост 3002 не запущен, пробуем напрямую опросить API OneZeroMiner 127.0.0.1:3001
-    if (!bridgeOk) {
+      const timer = setTimeout(() => ctrl.abort(), 4000);
       try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 1500);
-        const res = await fetch(`http://127.0.0.1:${rigConfig.apiPort}/`, {
-          method: 'GET',
-          signal: ctrl.signal,
-        });
-        clearTimeout(timer);
-
-        if (res.ok) {
-          const apiData = await res.json();
-          const algo = Array.isArray(apiData?.algos) ? apiData.algos[0] : null;
-          const rawRates = Array.isArray(algo?.hashrates) ? algo.hashrates : [];
-          const h0Raw = typeof rawRates[0] === 'number' ? rawRates[0] : null;
-          const h1Raw = typeof rawRates[1] === 'number' ? rawRates[1] : null;
-          const h0 =
-            h0Raw !== null
-              ? h0Raw > 10000
-                ? Number((h0Raw / 1_000_000).toFixed(2))
-                : Number(h0Raw.toFixed(2))
-              : null;
-          const h1 =
-            h1Raw !== null
-              ? h1Raw > 10000
-                ? Number((h1Raw / 1_000_000).toFixed(2))
-                : Number(h1Raw.toFixed(2))
-              : null;
-
-          const acc =
-            typeof algo?.total_accepted_shares === 'number'
-              ? algo.total_accepted_shares
-              : null;
-          const rej =
-            typeof algo?.total_rejected_shares === 'number'
-              ? algo.total_rejected_shares
-              : null;
-          const connected =
-            typeof algo?.pool_connected === 'boolean'
-              ? algo.pool_connected
-              : h0 !== null || h1 !== null
-              ? (h0 || 0) + (h1 || 0) > 0
-              : null;
-
-          setPoolStatus((prev) => ({
-            ...prev,
-            connected,
-            poolUrl: algo?.pool || rigConfig.primaryPool,
-            uptimeSec:
-              typeof apiData?.uptime_seconds === 'number' ? apiData.uptime_seconds : null,
-            apiAvailable: true,
-            nvmlAvailable: false,
-            minerProcessRunning: true,
-            lastError: null,
-          }));
-
-          setGpuMetrics([
-            {
-              ...createEmptyGpuMetrics()[0],
-              hashrateMHs: h0,
-              acceptedShares: acc,
-              rejectedShares: rej,
-              status: h0 !== null ? 'nominal' : 'no_data',
-            },
-            {
-              ...createEmptyGpuMetrics()[1],
-              hashrateMHs: h1,
-              status: h1 !== null ? 'nominal' : 'no_data',
-            },
-          ]);
-          return;
-        }
-      } catch {
-        // API 3001 также недоступен
-      }
-
-      // Оба источника недоступны — строго показываем «нет данных» (null)
-      setPoolStatus((prev) => ({
-        ...prev,
-        connected: null,
-        poolUrl: null,
-        pingMs: null,
-        uptimeSec: null,
-        apiAvailable: false,
-        nvmlAvailable: false,
-        minerProcessRunning: null,
-        minerPid: null,
-      }));
-      setGpuMetrics(createEmptyGpuMetrics());
+        const res = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      } finally { clearTimeout(timer); }
+    };
+    let data: any = null;
+    try {
+      const bridge = await fetchJson('/api/telemetry');
+      // Older agents use MH/s and a different per-GPU share mapping.
+      const age = Date.now() - Date.parse(bridge.sampledAt);
+      if (bridge.schemaVersion === 4 && Number.isFinite(age) && Math.abs(age) <= 20000) data = bridge;
+    } catch { /* Try the miner's native API. */ }
+    if (!data) {
+      try { data = parseMinerTelemetry(await fetchJson(`http://127.0.0.1:${rigConfig.apiPort}/`)); }
+      catch { data = parseMinerTelemetry({}); }
     }
-  }, [rigConfig.agentBridgePort, rigConfig.apiPort, rigConfig.primaryPool, rigConfig.userStoppedManually, policy.maxTempC]);
+    setPoolStatus({
+      connected: typeof data.poolConnected === 'boolean' ? data.poolConnected : null,
+      poolUrl: data.poolUrl ?? null, pingMs: null, uptimeSec: numberOrNull(data.uptimeSec),
+      apiAvailable: data.apiAvailable === true, nvmlAvailable: data.nvmlAvailable === true,
+      minerProcessRunning: typeof data.minerProcessRunning === 'boolean' ? data.minerProcessRunning : null,
+      minerPid: numberOrNull(data.minerPid), reconnectStage: data.reconnectStage ?? 'idle',
+      restartAttempts: data.restartAttempts ?? 0, sharesAtRestart: data.sharesAtRestart ?? 0,
+      recoveryConfirmed: data.recoveryConfirmed === true, lastError: null,
+    });
+    setRigConfig(prev => ({ ...prev, miningActive: data.minerProcessRunning === true, userStoppedManually: data.userStoppedManually === true }));
+    setTotals({ hash: numberOrNull(data.totalHashrateTHs), accepted: numberOrNull(data.acceptedShares), rejected: numberOrNull(data.rejectedShares) });
+    setLastSampleAt(data.sampledAt ?? null);
+    setGpuMetrics([0, 1].map(id => gpuFromTelemetry(data.gpus?.find((g: any) => g.id === id), id, policy.maxTempC)) as [GpuLiveMetrics, GpuLiveMetrics]);
+  }, [rigConfig.agentBridgePort, rigConfig.apiPort, policy.maxTempC]);
 
   useEffect(() => {
     pollRealTelemetry();
@@ -481,17 +312,12 @@ export default function App() {
   }, [pollRealTelemetry]);
 
   // Вычисляемые агрегаты (только при наличии реальных данных, иначе null)
-  const totalHashrate: number | null = useMemo(() => {
-    const h0 = gpuMetrics[0].hashrateMHs;
-    const h1 = gpuMetrics[1].hashrateMHs;
-    if (h0 === null && h1 === null) return null;
-    return Number(((h0 || 0) + (h1 || 0)).toFixed(2));
-  }, [gpuMetrics]);
+  const totalHashrate = totals.hash;
 
   const totalPowerWatts: number | null = useMemo(() => {
     const p0 = gpuMetrics[0].powerWatts;
     const p1 = gpuMetrics[1].powerWatts;
-    if (p0 === null && p1 === null) return null;
+    if (p0 === null || p1 === null) return null;
     return Number(((p0 || 0) + (p1 || 0)).toFixed(1));
   }, [gpuMetrics]);
 
@@ -503,19 +329,8 @@ export default function App() {
     return t0 !== null ? t0 : t1;
   }, [gpuMetrics]);
 
-  const totalAcceptedShares: number | null = useMemo(() => {
-    const a0 = gpuMetrics[0].acceptedShares;
-    const a1 = gpuMetrics[1].acceptedShares;
-    if (a0 === null && a1 === null) return null;
-    return (a0 || 0) + (a1 || 0);
-  }, [gpuMetrics]);
-
-  const totalRejectedShares: number | null = useMemo(() => {
-    const r0 = gpuMetrics[0].rejectedShares;
-    const r1 = gpuMetrics[1].rejectedShares;
-    if (r0 === null && r1 === null) return null;
-    return (r0 || 0) + (r1 || 0);
-  }, [gpuMetrics]);
+  const totalAcceptedShares = totals.accepted;
+  const totalRejectedShares = totals.rejected;
 
   // Обработчики для кошелька
   const handleCheckDraftWallet = () => {
@@ -585,6 +400,14 @@ export default function App() {
     }
   };
 
+  const handleLocalSession = useCallback((session: any) => {
+    if (!session.configured) return;
+    setRigConfig(prev => ({ ...prev, walletAddress:session.wallet, walletSaved:true, primaryPool:session.pool,
+      gpus: session.gpus.map((g: any, id: number) => ({ ...prev.gpus[id], ...g })) as [GpuSettings, GpuSettings] }));
+    setDraftWallet(session.wallet);
+    setIsEditingWallet(false);
+  }, []);
+
   // Кнопки «Запустить» и «Стоп»
   const handleStartMining = () => {
     if (!canStartMining) {
@@ -632,18 +455,7 @@ export default function App() {
   };
 
   const handleStopMining = () => {
-    setRigConfig((prev) => ({
-      ...prev,
-      miningActive: false,
-      userStoppedManually: true,
-    }));
-
-    addEvent(
-      'PROCESS',
-      'warning',
-      'Нажата кнопка «Стоп»: майнинг переведён в состояние намеренной остановки.',
-      'Флаг userStoppedManually=true активен. Watchdog не будет перезапускать майнер автоматически без вашей команды «Запустить».'
-    );
+    addEvent('PROCESS', 'info', 'Для остановки используйте кнопку «Стоп» в локальном окне Rig Control.', 'Веб-панель только отображает телеметрию. Майнер продолжает работать.');
   };
 
   const handleResetDefaultOcProfile = () => {
@@ -789,7 +601,7 @@ export default function App() {
               activeTab === 'telemetry' ? 'text-slate-100 border-b-2 border-emerald-500' : ''
             }`}
           >
-            Кошелёк, Запуск и Телеметрия
+            Доход, температуры и состояние
           </button>
           <button
             onClick={() => setActiveTab('overclock')}
@@ -797,7 +609,7 @@ export default function App() {
               activeTab === 'overclock' ? 'text-slate-100 border-b-2 border-emerald-500' : ''
             }`}
           >
-            Профиль GPU (150W / 2400 / 810)
+            Настройки GPU
           </button>
           <button
             onClick={() => setActiveTab('diagnostics')}
@@ -905,9 +717,9 @@ export default function App() {
             <div className="p-3.5 rounded-lg bg-slate-900/80 border border-slate-800 space-y-1.5 text-xs">
               <div className="font-semibold text-slate-200">Фиксированный профиль карт</div>
               <div className="text-slate-400 font-mono text-[11px] space-y-1">
-                <div>GPU 0: 150W · 2400/810 MHz · K2 · Fan 65%</div>
-                <div>GPU 1: 150W · 2400/810 MHz · K2 · Fan Авто</div>
-                <div>Защита: &ge; {policy.maxTempC} °C (PL {policy.emergencyPlWatts}W / Стоп)</div>
+                <div>GPU 0: {rigConfig.gpus[0].pl}W · {rigConfig.gpus[0].cclk}/810 MHz · Fan {rigConfig.gpus[0].fan}%</div>
+                <div>GPU 1: {rigConfig.gpus[1].pl}W · {rigConfig.gpus[1].cclk}/810 MHz · Fan {rigConfig.gpus[1].fan === "*" ? "Авто" : rigConfig.gpus[1].fan+"%"}</div>
+                <div>Порог перегрева: &ge; 85 °C</div>
               </div>
             </div>
           </div>
@@ -926,633 +738,8 @@ export default function App() {
 
         {/* Основная рабочая область */}
         <main className="flex-1 p-6 lg:p-8 space-y-7 overflow-y-auto">
-          {/* ГЛАВНОЕ ТРЕБОВАНИЕ: Блок публичного адреса кошелька Pearl ДО первого запуска */}
-          <section className="p-6 rounded-2xl border border-emerald-500/40 bg-[#111827] shadow-lg space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
-                  <Wallet className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-white">
-                    Публичный адрес кошелька Pearl (обязателен до первого запуска)
-                  </h2>
-                  <p className="text-xs text-slate-300 mt-0.5">
-                    Укажите только публичный адрес кошелька Pearl (<code className="font-mono text-emerald-300">prl1p...</code> из 63 символов или <code className="font-mono text-emerald-300">prl1q...</code>).{' '}
-                    <strong className="text-amber-300">
-                      Никогда не вводите seed-фразу или приватный ключ!
-                    </strong>{' '}
-                    Адрес хранится только локально и не может быть изменён через GitHub.
-                  </p>
-                </div>
-              </div>
-
-              <span
-                className={`px-3 py-1 rounded-full text-xs font-mono font-semibold shrink-0 ${
-                  canStartMining
-                    ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                    : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                }`}
-              >
-                {canStartMining ? 'Адрес сохранён локально' : 'Запуск заблокирован до сохранения адреса'}
-              </span>
-            </div>
-
-            {/* Режим отображения сохранённого адреса при повторных открытиях */}
-            {!isEditingWallet && rigConfig.walletSaved && savedWalletValidation.valid ? (
-              <div className="space-y-3">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-4 rounded-xl bg-slate-950/90 border border-emerald-500/30">
-                  <div className="space-y-1 min-w-0">
-                    <div className="text-xs text-slate-400">
-                      Сохранённый локально публичный адрес выплат Pearl ({rigConfig.walletAddress.length} симв.):
-                    </div>
-                    <div className="text-sm font-mono font-bold text-emerald-400 break-all">
-                      {rigConfig.walletAddress}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    {!confirmingEditUnlock ? (
-                      <button
-                        onClick={() => setConfirmingEditUnlock(true)}
-                        className="px-4 py-2 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors flex items-center gap-2 cursor-pointer"
-                      >
-                        <Edit3 className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Изменить</span>
-                      </button>
-                    ) : (
-                      <div className="flex items-center gap-2 bg-slate-900 p-1.5 rounded-lg border border-amber-500/40">
-                        <span className="text-xs text-amber-300 px-2">
-                          Подтверждаете смену адреса?
-                        </span>
-                        <button
-                          onClick={handleConfirmUnlockWalletEdit}
-                          className="px-3 py-1 text-xs font-bold text-slate-950 bg-amber-400 rounded hover:bg-amber-300 cursor-pointer"
-                        >
-                          Да, изменить
-                        </button>
-                        <button
-                          onClick={() => setConfirmingEditUnlock(false)}
-                          className="px-2.5 py-1 text-xs text-slate-300 bg-slate-800 rounded hover:bg-slate-700 cursor-pointer"
-                        >
-                          Отмена
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* Режим ввода, проверки формата и локального сохранения ДО первого запуска */
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-                  <div className="lg:col-span-7 space-y-1">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Публичный адрес кошелька Pearl (Bech32m prl1p... — 63 символа)
-                    </label>
-                    <input
-                      type="text"
-                      value={draftWallet}
-                      onChange={(e) => {
-                        setDraftWallet(e.target.value);
-                        setWalletStatusBanner(null);
-                      }}
-                      placeholder="prl1p... (вставьте полный 63-символьный публичный адрес)"
-                      className="w-full px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-700 text-sm font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
-                    />
-                  </div>
-
-                  <div className="lg:col-span-5 flex flex-wrap items-end gap-2">
-                    <button
-                      onClick={handleCheckDraftWallet}
-                      className="px-3.5 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors cursor-pointer"
-                    >
-                      Проверить формат
-                    </button>
-
-                    <button
-                      onClick={handleSaveWalletLocally}
-                      disabled={!draftWalletValidation.valid}
-                      className={`px-4 py-2.5 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 ${
-                        draftWalletValidation.valid
-                          ? 'bg-emerald-400 text-slate-950 hover:bg-emerald-300 cursor-pointer'
-                          : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                      }`}
-                    >
-                      <Check className="w-4 h-4" />
-                      Сохранить локально
-                    </button>
-
-                    {rigConfig.walletSaved && savedWalletValidation.valid && (
-                      <button
-                        onClick={handleCancelWalletEdit}
-                        className="px-3 py-2.5 text-xs text-slate-300 bg-slate-900 border border-slate-700 rounded-lg hover:bg-slate-800 cursor-pointer"
-                      >
-                        Отмена
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                <div
-                  className={`p-3 rounded-lg border text-xs font-mono flex items-center justify-between gap-3 ${
-                    draftWalletValidation.valid
-                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                      : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
-                  }`}
-                >
-                  <span>{draftWalletValidation.message}</span>
-                  <span className="shrink-0">
-                    {draftWalletValidation.length} / {draftWalletValidation.expectedLength} симв.
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {walletStatusBanner && (
-              <div
-                className={`p-3 rounded-lg border text-xs font-mono ${
-                  walletStatusBanner.type === 'ok'
-                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                    : walletStatusBanner.type === 'err'
-                    ? 'border-red-500/40 bg-red-500/10 text-red-300'
-                    : 'border-cyan-500/40 bg-cyan-500/10 text-cyan-300'
-                }`}
-              >
-                {walletStatusBanner.text}
-              </div>
-            )}
-
-            {/* Отдельные кнопки «Запустить» и «Стоп» */}
-            <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-4">
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={handleStartMining}
-                  disabled={!canStartMining}
-                  className={`px-6 py-2.5 text-sm font-bold rounded-xl transition-all flex items-center gap-2 ${
-                    canStartMining
-                      ? 'bg-emerald-400 text-slate-950 hover:bg-emerald-300 cursor-pointer shadow-[0_0_20px_rgba(16,185,129,0.3)]'
-                      : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
-                  }`}
-                >
-                  <Play className="w-4 h-4 fill-current" />
-                  Запустить
-                </button>
-
-                <button
-                  onClick={handleStopMining}
-                  className="px-5 py-2.5 text-sm font-bold text-white bg-red-600 hover:bg-red-500 rounded-xl transition-colors flex items-center gap-2 cursor-pointer"
-                >
-                  <Square className="w-4 h-4 fill-current" />
-                  Стоп
-                </button>
-
-                <button
-                  onClick={pollRealTelemetry}
-                  className="px-4 py-2.5 text-xs font-semibold text-slate-200 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-xl transition-colors flex items-center gap-2 cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5 text-cyan-400" />
-                  Опросить API :3001 и nvidia-smi
-                </button>
-              </div>
-
-              <div className="text-xs text-slate-400 font-mono">
-                Пул: <span className="text-slate-200">{rigConfig.primaryPool}</span>
-              </div>
-            </div>
-          </section>
-
-          {activeTab === 'telemetry' && (
-            <div className="space-y-7">
-              {/* Баннер состояния источников данных */}
-              {(!poolStatus.apiAvailable || !poolStatus.nvmlAvailable) && (
-                <div className="p-4 rounded-xl border border-slate-700 bg-slate-900/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <div className="font-semibold text-slate-100">
-                        Режим честной телеметрии (генерация случайных показателей отключена)
-                      </div>
-                      <p className="text-slate-400">
-                        {!poolStatus.apiAvailable &&
-                          `API OneZeroMiner (http://127.0.0.1:${rigConfig.apiPort}) сейчас недоступен — хешрейт, шары и статус пула показывают «нет данных». `}
-                        {!poolStatus.nvmlAvailable &&
-                          `Локальный мост nvidia-smi (http://127.0.0.1:${rigConfig.agentBridgePort}/telemetry) сейчас недоступен — температуры, мощность и вентиляторы показывают «нет данных».`}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={pollRealTelemetry}
-                    className="px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 shrink-0 cursor-pointer"
-                  >
-                    Проверить снова
-                  </button>
-                </div>
-              )}
-
-              {/* 4 главных прибора (показывают реальные значения или «нет данных») */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <SpeedometerGauge
-                  label="Суммарный хешрейт"
-                  sublabel={`API 127.0.0.1:${rigConfig.apiPort}`}
-                  value={totalHashrate}
-                  min={0}
-                  max={300}
-                  unit="MH/s"
-                  decimals={2}
-                  accent="emerald"
-                  extraInfo={[
-                    { label: 'GPU #0', value: formatMetric(gpuMetrics[0].hashrateMHs, ' MH/s') },
-                    { label: 'GPU #1', value: formatMetric(gpuMetrics[1].hashrateMHs, ' MH/s') },
-                    { label: 'Принято шар', value: formatMetric(totalAcceptedShares) },
-                    { label: 'Отклонено', value: formatMetric(totalRejectedShares) },
-                  ]}
-                />
-
-                <SpeedometerGauge
-                  label="Мощность видеокарт"
-                  sublabel="Данные из nvidia-smi"
-                  value={totalPowerWatts}
-                  min={0}
-                  max={350}
-                  warningThreshold={305}
-                  criticalThreshold={320}
-                  unit="W (Ватт)"
-                  decimals={1}
-                  accent="cyan"
-                  extraInfo={[
-                    { label: 'GPU #0', value: formatMetric(gpuMetrics[0].powerWatts, ' W') },
-                    { label: 'GPU #1', value: formatMetric(gpuMetrics[1].powerWatts, ' W') },
-                    { label: 'Лимит PL', value: `${rigConfig.gpus[0].pl},${rigConfig.gpus[1].pl} W` },
-                    { label: 'Аварийный PL', value: `${policy.emergencyPlWatts} W` },
-                  ]}
-                />
-
-                <SpeedometerGauge
-                  label="Температура GPU (Макс)"
-                  sublabel={`Защита от перегрева: >= ${policy.maxTempC} °C`}
-                  value={maxGpuTempC}
-                  min={25}
-                  max={95}
-                  warningThreshold={80}
-                  criticalThreshold={policy.maxTempC}
-                  unit="°C"
-                  decimals={0}
-                  accent="amber"
-                  extraInfo={[
-                    { label: 'GPU #0 Ядро', value: formatMetric(gpuMetrics[0].tempC, ' °C') },
-                    { label: 'GPU #1 Ядро', value: formatMetric(gpuMetrics[1].tempC, ' °C') },
-                    { label: 'Кулер GPU #0', value: formatMetric(gpuMetrics[0].fanPercent, ' %') },
-                    { label: 'Кулер GPU #1', value: formatMetric(gpuMetrics[1].fanPercent, ' %') },
-                  ]}
-                />
-
-                <SpeedometerGauge
-                  label="Время работы майнера"
-                  sublabel="Статус пула Kryptex Pearl"
-                  value={poolStatus.uptimeSec !== null ? Math.round(poolStatus.uptimeSec / 60) : null}
-                  min={0}
-                  max={1440}
-                  unit="мин"
-                  decimals={0}
-                  accent="violet"
-                  extraInfo={[
-                    {
-                      label: 'Статус пула',
-                      value:
-                        poolStatus.connected === true
-                          ? 'Connected'
-                          : poolStatus.connected === false
-                          ? 'Disconnected'
-                          : 'нет данных',
-                      highlight:
-                        poolStatus.connected === true
-                          ? 'ok'
-                          : poolStatus.connected === false
-                          ? 'err'
-                          : undefined,
-                    },
-                    {
-                      label: 'Попытки рестарта',
-                      value: `${poolStatus.restartAttempts} / ${policy.maxRestartAttempts}`,
-                    },
-                    {
-                      label: 'Восстановление',
-                      value: poolStatus.recoveryConfirmed ? 'Подтверждено' : 'Ожидание',
-                    },
-                    {
-                      label: 'Этап',
-                      value: poolStatus.reconnectStage,
-                    },
-                  ]}
-                />
-              </div>
-
-              {/* Детальные карточки обеих видеокарт RTX 4070 Ti */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {gpuMetrics.map((gpu, idx) => (
-                  <div
-                    key={gpu.id}
-                    className="p-5 rounded-xl border border-slate-800 bg-[#111827] space-y-4"
-                  >
-                    <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                      <div>
-                        <div className="text-sm font-bold text-white">
-                          GPU #{gpu.id} · {gpu.name}
-                        </div>
-                        <div className="text-xs text-slate-400 font-mono">
-                          PCI {rigConfig.gpus[idx].pciBus} · Профиль: PL {rigConfig.gpus[idx].pl}W, CClk{' '}
-                          {rigConfig.gpus[idx].cclk} MHz, MClk {rigConfig.gpus[idx].mclk} MHz, Kernel{' '}
-                          {rigConfig.gpus[idx].kernel}, Fan {rigConfig.gpus[idx].fan}
-                        </div>
-                      </div>
-                      <span className="px-2.5 py-1 rounded text-xs font-mono bg-slate-900 border border-slate-700 text-slate-300">
-                        {gpu.status === 'no_data'
-                          ? 'нет данных'
-                          : gpu.status === 'critical'
-                          ? 'ПЕРЕГРЕВ >= 85°C'
-                          : 'Активна'}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                        <div className="text-slate-400">Хешрейт (API :3001)</div>
-                        <div className="text-sm font-mono font-bold text-slate-100 mt-1">
-                          {formatMetric(gpu.hashrateMHs, ' MH/s')}
-                        </div>
-                      </div>
-
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                        <div className="text-slate-400">Температура (nvidia-smi)</div>
-                        <div className="text-sm font-mono font-bold text-slate-100 mt-1">
-                          {formatMetric(gpu.tempC, ' °C')}
-                        </div>
-                      </div>
-
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                        <div className="text-slate-400">Мощность (nvidia-smi)</div>
-                        <div className="text-sm font-mono font-bold text-slate-100 mt-1">
-                          {formatMetric(gpu.powerWatts, ' Вт')}
-                        </div>
-                      </div>
-
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                        <div className="text-slate-400">Вентилятор (nvidia-smi)</div>
-                        <div className="text-sm font-mono font-bold text-slate-100 mt-1">
-                          {formatMetric(gpu.fanPercent, ' %')}
-                        </div>
-                      </div>
-
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                        <div className="text-slate-400">Частота ядра сейчас</div>
-                        <div className="text-sm font-mono font-bold text-slate-100 mt-1">
-                          {formatMetric(gpu.cclkMHz, ' МГц')}
-                        </div>
-                      </div>
-
-                      <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800">
-                        <div className="text-slate-400">Частота памяти сейчас</div>
-                        <div className="text-sm font-mono font-bold text-slate-100 mt-1">
-                          {formatMetric(gpu.mclkMHz, ' МГц')}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Журнал событий */}
-              <div className="p-5 rounded-xl border border-slate-800 bg-[#111827] space-y-3">
-                <h3 className="text-sm font-bold text-white">Журнал локальных событий и проверок</h3>
-                <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
-                  {events.map((ev) => (
-                    <div
-                      key={ev.id}
-                      className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-xs space-y-1"
-                    >
-                      <div className="flex items-center justify-between text-slate-400 font-mono">
-                        <span>
-                          {ev.timestamp} · {ev.category}
-                        </span>
-                        <span
-                          className={
-                            ev.severity === 'error'
-                              ? 'text-red-400'
-                              : ev.severity === 'warning'
-                              ? 'text-amber-400'
-                              : 'text-emerald-400'
-                          }
-                        >
-                          {ev.severity === 'error'
-                            ? 'Ошибка'
-                            : ev.severity === 'warning'
-                            ? 'Внимание'
-                            : 'Инфо'}
-                        </span>
-                      </div>
-                      <div className="text-slate-100 font-medium">{ev.message}</div>
-                      <div className="text-slate-400 font-mono">{ev.actionTaken}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'overclock' && (
-            <div className="space-y-6">
-              <div className="p-6 rounded-xl border border-slate-800 bg-[#111827] space-y-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
-                  <div>
-                    <h2 className="text-base font-bold text-white">
-                      Профиль видеокарт Dual RTX 4070 Ti и тепловая защита (&ge; 85 °C)
-                    </h2>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      Power Limit 150 Вт, память 810 МГц, целевая частота ядра 2400 МГц, Kernel 2; вентилятор GPU 0 — 65%, GPU 1 — автоматический (*). Без повышения напряжения.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleResetDefaultOcProfile}
-                    className="px-3.5 py-2 text-xs font-bold text-slate-950 bg-emerald-400 rounded-lg hover:bg-emerald-300 transition-colors cursor-pointer shrink-0"
-                  >
-                    Восстановить профиль 150W / 2400 / 810
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                  {rigConfig.gpus.map((gpu, idx) => (
-                    <div
-                      key={gpu.id}
-                      className="p-4 rounded-xl bg-slate-900/70 border border-slate-800 space-y-4"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-bold text-white">
-                          GPU #{gpu.id} · {gpu.name}
-                        </span>
-                        <span className="text-xs font-mono text-emerald-400">
-                          Kernel {gpu.kernel} · Без овервольтажа
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3 text-xs">
-                        <div className="space-y-1">
-                          <label className="text-slate-400">Целевое ядро --cclk (МГц)</label>
-                          <input
-                            type="number"
-                            value={gpu.cclk}
-                            onChange={(e) => {
-                              const val = Number(e.target.value);
-                              setRigConfig((prev) => {
-                                const next: [typeof gpu, typeof gpu] = [
-                                  ...prev.gpus,
-                                ] as [typeof gpu, typeof gpu];
-                                next[idx] = { ...next[idx], cclk: val };
-                                return { ...prev, gpus: next };
-                              });
-                            }}
-                            className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-slate-400">Память --mclk (МГц)</label>
-                          <input
-                            type="number"
-                            value={gpu.mclk}
-                            onChange={(e) => {
-                              const val = Number(e.target.value);
-                              setRigConfig((prev) => {
-                                const next: [typeof gpu, typeof gpu] = [
-                                  ...prev.gpus,
-                                ] as [typeof gpu, typeof gpu];
-                                next[idx] = { ...next[idx], mclk: val };
-                                return { ...prev, gpus: next };
-                              });
-                            }}
-                            className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-slate-400">Power Limit --pl (Вт)</label>
-                          <input
-                            type="number"
-                            value={gpu.pl}
-                            onChange={(e) => {
-                              const val = Number(e.target.value);
-                              setRigConfig((prev) => {
-                                const next: [typeof gpu, typeof gpu] = [
-                                  ...prev.gpus,
-                                ] as [typeof gpu, typeof gpu];
-                                next[idx] = { ...next[idx], pl: val };
-                                return { ...prev, gpus: next };
-                              });
-                            }}
-                            className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <label className="text-slate-400">Вентилятор --fan (% или *)</label>
-                          <input
-                            type="text"
-                            value={gpu.fan}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setRigConfig((prev) => {
-                                const next: [typeof gpu, typeof gpu] = [
-                                  ...prev.gpus,
-                                ] as [typeof gpu, typeof gpu];
-                                next[idx] = { ...next[idx], fan: val };
-                                return { ...prev, gpus: next };
-                              });
-                            }}
-                            className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Настройки защиты от перегрева и переподключения */}
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-3 border-t border-slate-800 text-xs">
-                  <div className="space-y-1">
-                    <label className="text-slate-400">Порог снижения PL (°C)</label>
-                    <input
-                      type="number"
-                      value={policy.maxTempC}
-                      onChange={(e) =>
-                        setPolicy((prev) => ({ ...prev, maxTempC: Number(e.target.value) }))
-                      }
-                      className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-slate-400">Аварийный PL при &ge; 85°C (Вт)</label>
-                    <input
-                      type="number"
-                      value={policy.emergencyPlWatts}
-                      onChange={(e) =>
-                        setPolicy((prev) => ({
-                          ...prev,
-                          emergencyPlWatts: Number(e.target.value),
-                        }))
-                      }
-                      className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-slate-400">Ожидание реконнекта (сек)</label>
-                    <input
-                      type="number"
-                      value={policy.zeroHashrateRestartSec}
-                      onChange={(e) =>
-                        setPolicy((prev) => ({
-                          ...prev,
-                          zeroHashrateRestartSec: Number(e.target.value),
-                        }))
-                      }
-                      className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-slate-400">Макс. попыток перезапуска</label>
-                    <input
-                      type="number"
-                      value={policy.maxRestartAttempts}
-                      onChange={(e) =>
-                        setPolicy((prev) => ({
-                          ...prev,
-                          maxRestartAttempts: Number(e.target.value),
-                        }))
-                      }
-                      className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-                    />
-                  </div>
-                </div>
-
-                {/* Итоговая строка запуска */}
-                <div className="pt-3 border-t border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-400">
-                      Сформированная команда запуска OneZeroMiner:
-                    </span>
-                    <button
-                      onClick={handleCopyCmd}
-                      className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 cursor-pointer"
-                    >
-                      {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      {copiedCmd ? 'Скопировано' : 'Скопировать'}
-                    </button>
-                  </div>
-                  <pre className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-emerald-300 overflow-x-auto">
-                    {generatedOneLineCmd}
-                  </pre>
-                </div>
-              </div>
-            </div>
+          {(activeTab === 'telemetry' || activeTab === 'overclock') && (
+            <RigControlPanel mode={activeTab === 'telemetry' ? 'overview' : 'settings'} gpus={gpuMetrics} pool={poolStatus} onSession={handleLocalSession} onConfigure={() => setActiveTab('overclock')} />
           )}
 
           {activeTab === 'diagnostics' && (

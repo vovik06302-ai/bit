@@ -17,6 +17,7 @@ start "" powershell -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass 
 exit /b
 
 :: ___PS_START___
+param([switch]$ReadOnly)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -27,7 +28,7 @@ $ErrorActionPreference = "SilentlyContinue"
 $MinerDir = "C:\Users\User\Documents\Codex\2026-10-25\new-chat\outputs\Pearl\miner\onezerominer-win64-1.8.3"
 $LogFile = "C:\Users\User\Documents\Codex\2026-10-25\new-chat\work\pearl-miner.log"
 $Worker = "dual4070ti"
-$Pool1 = "stratum+tcp://prl.kryptex.network:7048"
+$Pool1 = "stratum+tcp://prl-ru.kryptex.network:7048"
 $Pool2 = "stratum+tcp://prl-eu.kryptex.network:7048"
 $ApiPort = 3001
 $BridgePort = 3002
@@ -91,6 +92,99 @@ $Gpu1CClkNow = $null
 $Gpu0MClkNow = $null
 $Gpu1MClkNow = $null
 
+# Pure conversion functions; neither starts processes nor changes GPU settings.
+function ConvertTo-PearlNumber($Value) {
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
+    $number = 0.0
+    if ([double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -and
+        -not [double]::IsNaN($number) -and -not [double]::IsInfinity($number) -and $number -ge 0) { return $number }
+    return $null
+}
+
+function Convert-PearlTelemetry($ApiResponse, $NvidiaLines, [double]$NowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) {
+    $updated = ConvertTo-PearlNumber $ApiResponse.last_update
+    $fresh = $null -ne $updated -and [Math]::Abs($NowUnix - $updated) -le 20
+    $algo = $null
+    $devices = @()
+    if ($fresh) {
+        $algo = @($ApiResponse.algos | Where-Object { $_.name -eq 'pearlhash' } | Select-Object -First 1)
+        $algo = if ($algo.Count) { $algo[0] } else { $null }
+        $devices = @($ApiResponse.devices)
+    }
+    $poolConnected = $null
+    if ($null -ne $algo.pool_connected -and $algo.pool_connected -is [bool]) { $poolConnected = $algo.pool_connected }
+    elseif ($algo.pool_status) {
+        switch -Regex (([string]$algo.pool_status).Trim()) {
+            '^(Connected|Online|Active)$' { $poolConnected = $true }
+            '^(Disconnected|Offline|Inactive|Connecting|Reconnecting)$' { $poolConnected = $false }
+        }
+    }
+    $nv = @{}
+    foreach ($line in $NvidiaLines) {
+        $parts = $line -split ','
+        if ($parts.Count -ne 8) { continue }
+        $index = ConvertTo-PearlNumber $parts[0].Trim()
+        if ($null -eq $index -or $index -notin @(0,1)) { continue }
+        $bus = $null
+        if ($parts[1].Trim() -match '^[0-9A-Fa-f]+:([0-9A-Fa-f]+):[0-9A-Fa-f]+\.[0-9]+$') {
+            $bus = [Convert]::ToInt32($Matches[1], 16)
+        }
+        $nv[[int]$index] = @{
+            bus = $bus
+            tempC = ConvertTo-PearlNumber $parts[2].Trim()
+            powerWatts = ConvertTo-PearlNumber $parts[3].Trim()
+            fanPercent = ConvertTo-PearlNumber $parts[4].Trim()
+            cclkMHz = ConvertTo-PearlNumber $parts[5].Trim()
+            mclkMHz = ConvertTo-PearlNumber $parts[6].Trim()
+            vramTempC = ConvertTo-PearlNumber $parts[7].Trim()
+        }
+    }
+    $gpus = foreach ($id in @(0,1)) {
+        $position = -1
+        for ($i=0; $i -lt $devices.Count; $i++) {
+            $matchesDevice = if ($nv.ContainsKey($id) -and $null -ne $nv[$id].bus) {
+                $null -ne $devices[$i].bus_id -and [int]$devices[$i].bus_id -eq $nv[$id].bus
+            } else { $devices[$i].id -eq $id }
+            if ($matchesDevice) { $position = $i; break }
+        }
+        $device = if ($position -ge 0) { $devices[$position] } else { $null }
+        $rate = $null; $accepted = $null; $rejected = $null
+        if ($null -ne $algo -and $position -ge 0) {
+            if ($null -ne $algo.hashrates -and $position -lt @($algo.hashrates).Count) { $rate = ConvertTo-PearlNumber $algo.hashrates[$position] }
+            if ($null -ne $algo.devices_accepted_shares -and $position -lt @($algo.devices_accepted_shares).Count) { $accepted = ConvertTo-PearlNumber $algo.devices_accepted_shares[$position] }
+            if ($null -ne $algo.devices_rejected_shares -and $position -lt @($algo.devices_rejected_shares).Count) { $rejected = ConvertTo-PearlNumber $algo.devices_rejected_shares[$position] }
+        }
+        $sensors = if ($nv.ContainsKey($id)) { $nv[$id] } else { @{
+            tempC = ConvertTo-PearlNumber $device.temp
+            powerWatts = ConvertTo-PearlNumber $device.power
+            fanPercent = ConvertTo-PearlNumber $device.fan
+            cclkMHz = ConvertTo-PearlNumber $device.cclk
+            mclkMHz = ConvertTo-PearlNumber $device.mclk
+            vramTempC = ConvertTo-PearlNumber $device.mem_temp
+        } }
+        @{
+            id = $id; name = if ($device.name) { $device.name } else { "GPU $id" }
+            hashrateTHs = if ($null -ne $rate) { $rate / 1e12 } else { $null }
+            acceptedShares = $accepted; rejectedShares = $rejected
+            tempC = $sensors.tempC; powerWatts = $sensors.powerWatts; fanPercent = $sensors.fanPercent
+            cclkMHz = $sensors.cclkMHz; mclkMHz = $sensors.mclkMHz; vramTempC = $sensors.vramTempC
+            sensorSource = if ($nv.ContainsKey($id)) { 'nvidia-smi' } elseif ($device) { 'miner-api' } else { $null }
+        }
+    }
+    $totalRate = ConvertTo-PearlNumber $algo.total_hashrate
+    return @{
+        ok = $true; schemaVersion = 4; sampledAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$NowUnix).ToString('o')
+        apiAvailable = $fresh -and $null -ne $algo; nvmlAvailable = $nv.Count -gt 0
+        poolConnected = $poolConnected; poolUrl = $algo.pool
+        uptimeSec = if ($fresh) { ConvertTo-PearlNumber $ApiResponse.uptime_seconds } else { $null }
+        totalHashrateTHs = if ($null -ne $totalRate) { $totalRate / 1e12 } else { $null }
+        acceptedShares = ConvertTo-PearlNumber $algo.total_accepted_shares
+        rejectedShares = ConvertTo-PearlNumber $algo.total_rejected_shares
+        invalidShares = ConvertTo-PearlNumber $algo.total_invalid_shares
+        gpus = @($gpus)
+    }
+}
+
 function Test-PearlWalletFormat([string]$Addr) {
     if ([string]::IsNullOrWhiteSpace($Addr)) {
         return @{ Valid = $false; Reason = "Адрес пуст. Введите публичный адрес кошелька Pearl (prl1p... 63 символа)." }
@@ -139,7 +233,7 @@ if (Test-Path $LocalWalletFile) {
 # ОКНО УПРАВЛЕНИЯ PEARL RIG CONTROL (БЕЗ АВТОЗАПУСКА И СИМУЛЯЦИИ)
 # ============================================================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Pearl Rig Control v3.0 [$Worker] - Dual RTX 4070 Ti"
+$form.Text = "Pearl Rig Control v3.0.1 [$Worker] - Dual RTX 4070 Ti"
 $form.Size = New-Object System.Drawing.Size(1120, 780)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
@@ -314,13 +408,14 @@ function Sync-WalletUiState {
 
 function Format-Metric($val, [string]$suffix = "") {
     if ($null -eq $val) { return "нет данных" }
+    if ($val -is [double] -or $val -is [single] -or $val -is [decimal]) { $val = [Math]::Round($val, 2) }
     return "$val$suffix"
 }
 
 function Update-TelemetryDisplay {
     $poolStr = if ($null -eq $script:PoolConnected) { "нет данных" } elseif ($script:PoolConnected) { "Connected ($($script:ActivePoolUrl))" } else { "Disconnected" }
     $apiStr = if ($script:ApiAvailable) { "Доступен (127.0.0.1:$ApiPort)" } else { "нет данных (API 127.0.0.1:$ApiPort недоступен)" }
-    $nvmlStr = if ($script:NvmlAvailable) { "Доступен (nvidia-smi)" } else { "нет данных (nvidia-smi недоступен)" }
+    $nvmlStr = if ($script:NvmlAvailable) { "nvidia-smi (реальные датчики)" } elseif ($script:ApiAvailable) { "API майнера (nvidia-smi недоступен)" } else { "нет данных" }
     $procStr = if ($script:IsMiningRunning) { "Работает (PID: $($script:MinerPid))" } elseif ($script:UserStoppedManually) { "Намеренно остановлен пользователем (Стоп)" } else { "Не запущен" }
 
     $lines = @(
@@ -332,10 +427,11 @@ function Update-TelemetryDisplay {
         "  Этап переподключения : $($script:ReconnectStage) (Попыток перезапуска: $($script:RestartCount)/$MaxRestartAttempts | Подтверждение восстановления: $($script:RecoveryConfirmed))",
         "",
         "ПОКАЗАТЕЛИ МАЙНИНГА (из API http://127.0.0.1:$ApiPort):",
-        "  Суммарный хешрейт    : $(Format-Metric $script:TotalHash ' MH/s')   (GPU #0: $(Format-Metric $script:Gpu0Hash ' MH/s') | GPU #1: $(Format-Metric $script:Gpu1Hash ' MH/s'))",
+        "  Суммарный хешрейт    : $(Format-Metric $script:TotalHash ' TH/s')   (GPU #0: $(Format-Metric $script:Gpu0Hash ' TH/s') | GPU #1: $(Format-Metric $script:Gpu1Hash ' TH/s'))",
+        "  GPU #0 шары         : $(Format-Metric $script:TelemetrySnapshot.gpus[0].acceptedShares) / $(Format-Metric $script:TelemetrySnapshot.gpus[0].rejectedShares)  | GPU #1: $(Format-Metric $script:TelemetrySnapshot.gpus[1].acceptedShares) / $(Format-Metric $script:TelemetrySnapshot.gpus[1].rejectedShares)",
         "  Шар принято / откл.  : $(Format-Metric $script:SharesAcc) / $(Format-Metric $script:SharesRej)   | Время работы майнера: $(Format-Metric $script:UptimeSec ' сек')",
         "",
-        "ДАТЧИКИ ВИДЕОКАРТ (из nvidia-smi, профиль: PL 150W, MClk 810 MHz, CClk 2400 MHz, Kernel 2, Fan 65%/*):",
+        "ДАТЧИКИ ВИДЕОКАРТ (источник: $nvmlStr; профиль: PL 150W, MClk 810 MHz, CClk 2400 MHz, Kernel 2, Fan 65%/*):",
         "  GPU #0 (RTX 4070 Ti) : Темп: $(Format-Metric $script:Gpu0Temp ' °C') | Мощность: $(Format-Metric $script:Gpu0Power ' Вт') | Кулер: $(Format-Metric $script:Gpu0Fan ' %') | Частоты: $(Format-Metric $script:Gpu0CClkNow)/$(Format-Metric $script:Gpu0MClkNow) MHz",
         "  GPU #1 (RTX 4070 Ti) : Темп: $(Format-Metric $script:Gpu1Temp ' °C') | Мощность: $(Format-Metric $script:Gpu1Power ' Вт') | Кулер: $(Format-Metric $script:Gpu1Fan ' %') | Частоты: $(Format-Metric $script:Gpu1CClkNow)/$(Format-Metric $script:Gpu1MClkNow) MHz"
     )
@@ -343,127 +439,37 @@ function Update-TelemetryDisplay {
 }
 
 function Poll-RealTelemetry {
-    $proc = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($proc) {
-        $script:IsMiningRunning = $true
-        $script:MinerPid = $proc.Id
-    } else {
-        $script:IsMiningRunning = $false
-        $script:MinerPid = $null
-    }
-
-    $script:ApiAvailable = $false
-    $script:Gpu0Hash = $null
-    $script:Gpu1Hash = $null
-    $script:TotalHash = $null
-    $script:SharesAcc = $null
-    $script:SharesRej = $null
-    $script:PoolConnected = $null
-    $script:ActivePoolUrl = $null
-    $script:UptimeSec = $null
-
+    $api = $null
+    $nvLines = @()
+    try { $api = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/" -TimeoutSec 2 -ErrorAction Stop } catch {}
     try {
-        $apiResp = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/" -Method Get -TimeoutSec 2 -ErrorAction Stop
-        if ($null -ne $apiResp) {
-            $script:ApiAvailable = $true
-            if ($null -ne $apiResp.uptime_seconds) { $script:UptimeSec = [int]$apiResp.uptime_seconds }
-            elseif ($null -ne $apiResp.uptime) { $script:UptimeSec = [int]$apiResp.uptime }
-
-            if ($apiResp.algos -and $apiResp.algos.Count -gt 0) {
-                $algo = $apiResp.algos[0]
-                if ($null -ne $algo.total_hashrate) {
-                    $rawTotal = [double]$algo.total_hashrate
-                    $script:TotalHash = if ($rawTotal -gt 10000) { [Math]::Round($rawTotal / 1000000.0, 2) } else { [Math]::Round($rawTotal, 2) }
-                }
-                if ($algo.hashrates -and $algo.hashrates.Count -ge 2) {
-                    $h0 = [double]$algo.hashrates[0]
-                    $h1 = [double]$algo.hashrates[1]
-                    $script:Gpu0Hash = if ($h0 -gt 10000) { [Math]::Round($h0 / 1000000.0, 2) } else { [Math]::Round($h0, 2) }
-                    $script:Gpu1Hash = if ($h1 -gt 10000) { [Math]::Round($h1 / 1000000.0, 2) } else { [Math]::Round($h1, 2) }
-                }
-                if ($null -ne $algo.total_accepted_shares) { $script:SharesAcc = [int]$algo.total_accepted_shares }
-                if ($null -ne $algo.total_rejected_shares) { $script:SharesRej = [int]$algo.total_rejected_shares }
-                if ($null -ne $algo.pool_connected) { $script:PoolConnected = [bool]$algo.pool_connected }
-                elseif ($algo.pool_status) { $script:PoolConnected = ($algo.pool_status -match "Connected|Online|Active") }
-                elseif ($null -ne $script:TotalHash) { $script:PoolConnected = ($script:TotalHash -gt 0) }
-                if ($algo.pool) { $script:ActivePoolUrl = [string]$algo.pool } else { $script:ActivePoolUrl = $Pool1 }
-            } elseif ($apiResp.devices) {
-                $sumH = 0.0
-                $accS = 0
-                $rejS = 0
-                if ($apiResp.devices.Count -ge 1) {
-                    $d0 = [double]$apiResp.devices[0].hashrate
-                    $script:Gpu0Hash = if ($d0 -gt 10000) { [Math]::Round($d0 / 1000000.0, 2) } else { [Math]::Round($d0, 2) }
-                    $sumH += $script:Gpu0Hash
-                    if ($null -ne $apiResp.devices[0].accepted_shares) { $accS += [int]$apiResp.devices[0].accepted_shares }
-                    if ($null -ne $apiResp.devices[0].rejected_shares) { $rejS += [int]$apiResp.devices[0].rejected_shares }
-                }
-                if ($apiResp.devices.Count -ge 2) {
-                    $d1 = [double]$apiResp.devices[1].hashrate
-                    $script:Gpu1Hash = if ($d1 -gt 10000) { [Math]::Round($d1 / 1000000.0, 2) } else { [Math]::Round($d1, 2) }
-                    $sumH += $script:Gpu1Hash
-                    if ($null -ne $apiResp.devices[1].accepted_shares) { $accS += [int]$apiResp.devices[1].accepted_shares }
-                    if ($null -ne $apiResp.devices[1].rejected_shares) { $rejS += [int]$apiResp.devices[1].rejected_shares }
-                }
-                $script:TotalHash = [Math]::Round($sumH, 2)
-                $script:SharesAcc = $accS
-                $script:SharesRej = $rejS
-                $script:PoolConnected = ($script:TotalHash -gt 0)
-                $script:ActivePoolUrl = $Pool1
-            }
+        $nvLines = @(& nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory,temperature.memory --format=csv,noheader,nounits 2>$null)
+        if ($LASTEXITCODE -ne 0) { $nvLines = @() }
+    } catch { $nvLines = @() }
+    $script:TelemetrySnapshot = Convert-PearlTelemetry $api $nvLines
+    $sample = $script:TelemetrySnapshot
+    $script:ApiAvailable = $sample.apiAvailable
+    $script:NvmlAvailable = $sample.nvmlAvailable
+    $script:PoolConnected = $sample.poolConnected
+    $script:ActivePoolUrl = $sample.poolUrl
+    $script:UptimeSec = $sample.uptimeSec
+    $script:TotalHash = $sample.totalHashrateTHs
+    $script:SharesAcc = $sample.acceptedShares
+    $script:SharesRej = $sample.rejectedShares
+    foreach ($id in @(0,1)) {
+        $gpu = $sample.gpus[$id]
+        foreach ($mapping in @(@('Hash','hashrateTHs'),@('Temp','tempC'),@('Power','powerWatts'),@('Fan','fanPercent'),@('CClkNow','cclkMHz'),@('MClkNow','mclkMHz'))) {
+            Set-Variable -Scope Script -Name ("Gpu"+$id+$mapping[0]) -Value $gpu[$mapping[1]]
         }
-    } catch {
-        $script:ApiAvailable = $false
     }
-
-    $script:NvmlAvailable = $false
-    $script:Gpu0Temp = $null; $script:Gpu1Temp = $null
-    $script:Gpu0Power = $null; $script:Gpu1Power = $null
-    $script:Gpu0Fan = $null; $script:Gpu1Fan = $null
-    $script:Gpu0CClkNow = $null; $script:Gpu1CClkNow = $null
-    $script:Gpu0MClkNow = $null; $script:Gpu1MClkNow = $null
-
-    try {
-        $smiOut = & nvidia-smi --query-gpu=index,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory --format=csv,noheader,nounits 2>$null
-        if ($LASTEXITCODE -eq 0 -and $smiOut) {
-            $lines = @($smiOut -split "`r?`n" | Where-Object { $_.Trim() -ne "" })
-            if ($lines.Count -ge 1) {
-                $script:NvmlAvailable = $true
-                foreach ($line in $lines) {
-                    $parts = $line -split ","
-                    if ($parts.Count -ge 6) {
-                        $idx = [int]($parts[0].Trim())
-                        $tVal = 0; $pVal = 0.0; $fVal = 0; $ccVal = 0; $mcVal = 0
-                        $tOk = [int]::TryParse($parts[1].Trim(), [ref]$tVal)
-                        $pOk = [double]::TryParse(($parts[2].Trim() -replace ",", "."), [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$pVal)
-                        $fOk = [int]::TryParse($parts[3].Trim(), [ref]$fVal)
-                        $ccOk = [int]::TryParse($parts[4].Trim(), [ref]$ccVal)
-                        $mcOk = [int]::TryParse($parts[5].Trim(), [ref]$mcVal)
-                        if ($idx -eq 0) {
-                            if ($tOk) { $script:Gpu0Temp = $tVal }
-                            if ($pOk) { $script:Gpu0Power = [Math]::Round($pVal, 1) }
-                            if ($fOk) { $script:Gpu0Fan = $fVal }
-                            if ($ccOk) { $script:Gpu0CClkNow = $ccVal }
-                            if ($mcOk) { $script:Gpu0MClkNow = $mcVal }
-                        } elseif ($idx -eq 1) {
-                            if ($tOk) { $script:Gpu1Temp = $tVal }
-                            if ($pOk) { $script:Gpu1Power = [Math]::Round($pVal, 1) }
-                            if ($fOk) { $script:Gpu1Fan = $fVal }
-                            if ($ccOk) { $script:Gpu1CClkNow = $ccVal }
-                            if ($mcOk) { $script:Gpu1MClkNow = $mcVal }
-                        }
-                    }
-                }
-            }
-        }
-    } catch {
-        $script:NvmlAvailable = $false
-    }
-
+    $proc = Get-Process -Name 'onezerominer' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $script:IsMiningRunning = $null -ne $proc
+    $script:MinerPid = if ($proc) { $proc.Id } else { $null }
     Update-TelemetryDisplay
 }
 
 function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
+    if ($ReadOnly) { return }
     $chk = Test-PearlWalletFormat $script:Wallet
     if (-not $script:WalletSaved -or -not $chk.Valid) {
         $lblStatus.Text = "Статус: ЗАПУСК ЗАБЛОКИРОВАН — сначала введите и сохраните корректный адрес Pearl!"
@@ -505,8 +511,8 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
     $script:ThermalThrottled = $false
 
     Set-Location $MinerDir
-    $minerArgs = "-a pearl -w $($script:Wallet) -o $Pool1 -o $Pool2 --worker $Worker --cclk $CurrentCClk --mclk $CurrentMClk --pl $CurrentPL --kernel $CurrentKernel --fan $CurrentFan --api-port $ApiPort --log-file `"$LogFile`""
-    $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WindowStyle Minimized -PassThru
+    $minerArgs = "-a pearl -w $($script:Wallet) -o $Pool1 --worker $Worker --cclk $CurrentCClk --mclk $CurrentMClk --pl $CurrentPL --kernel $CurrentKernel --fan $CurrentFan --api-port $ApiPort --log-file `"$LogFile`""
+    $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WindowStyle Normal -PassThru -ErrorAction Stop
     $script:IsMiningRunning = $true
     $script:MinerPid = if ($started) { $started.Id } else { $null }
 
@@ -517,6 +523,7 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
 }
 
 function Stop-MinerProcess([string]$Reason = "Нажата кнопка «Стоп» пользователем") {
+    if ($ReadOnly) { return }
     $script:UserStoppedManually = $true
     $script:MiningDesired = $false
     $script:ReconnectStage = "idle"
@@ -552,6 +559,7 @@ function Test-PoolTcpConnection {
 }
 
 function Invoke-WatchdogCheck {
+    if ($ReadOnly -or -not $script:MiningDesired -or $script:UserStoppedManually) { return }
     $maxTempNow = $null
     if ($null -ne $script:Gpu0Temp -and $null -ne $script:Gpu1Temp) {
         $maxTempNow = [Math]::Max($script:Gpu0Temp, $script:Gpu1Temp)
@@ -590,8 +598,8 @@ function Invoke-WatchdogCheck {
             $script:ReconnectStage = "idle"
             $script:RestartCount = 0
             $script:DisconnectElapsedSec = 0
-            Write-AgentLog "OK" "Восстановление подтверждено: пул Connected, хешрейт $($script:TotalHash) MH/s, принята новая шара ($($script:SharesAcc) > $($script:SharesAtRestart))."
-            $lblStatus.Text = "Статус: МАЙНИНГ ВОССТАНОВЛЕН И ПОДТВЕРЖДЁН ($($script:TotalHash) MH/s)"
+            Write-AgentLog "OK" "Восстановление подтверждено: пул Connected, хешрейт $($script:TotalHash) TH/s, принята новая шара ($($script:SharesAcc) > $($script:SharesAtRestart))."
+            $lblStatus.Text = "Статус: МАЙНИНГ ВОССТАНОВЛЕН И ПОДТВЕРЖДЁН ($($script:TotalHash) TH/s)"
             $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
         }
     }
@@ -632,7 +640,7 @@ function Invoke-WatchdogCheck {
     $script:RestartCount++
     $script:ReconnectStage = "awaiting_confirmation"
     $script:RecoveryConfirmed = $false
-    $script:SharesAtRestart = if ($null -ne $script:SharesAcc) { $script:SharesAcc } else { 0 }
+    $script:SharesAtRestart = 0 # New miner session resets accepted shares.
     Write-AgentLog "WARN" "Устойчивый сбой пула. Сеть доступна. Перезапуск майнера (попытка $($script:RestartCount) из $MaxRestartAttempts)..."
     Start-MinerProcess -IsWatchdogRestart $true
 }
@@ -691,7 +699,7 @@ $btnRefreshNow.Add_Click({ Poll-RealTelemetry })
 $existingOnOpen = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($existingOnOpen) {
     $script:IsMiningRunning = $true
-    $script:MiningDesired = $true
+    $script:MiningDesired = $false
     $script:MinerPid = $existingOnOpen.Id
     $lblStatus.Text = "Статус: Обнаружен уже работающий OneZeroMiner (PID $($existingOnOpen.Id)). Мониторинг подключён."
     $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
@@ -701,6 +709,15 @@ if ($existingOnOpen) {
 }
 
 Sync-WalletUiState
+if ($ReadOnly) {
+    $form.Text += " - только мониторинг"
+    $btnStart.Enabled = $false
+    $btnStop.Enabled = $false
+    $btnSaveWallet.Enabled = $false
+    $btnEditWallet.Enabled = $false
+    $txtWallet.ReadOnly = $true
+    $lblWalletHint.Text = "Режим мониторинга: настройки и работа майнера не изменяются."
+}
 Poll-RealTelemetry
 
 $timer = New-Object System.Windows.Forms.Timer
@@ -733,46 +750,19 @@ $timer.Add_Tick({
                     }
                     $path = $req.Url.AbsolutePath
                     if ($req.HttpMethod -eq "GET" -and ($path -eq "/telemetry" -or $path -eq "/status")) {
-                        $telemetryJson = @{
-                            ok = $true
-                            minerProcessRunning = $script:IsMiningRunning
-                            minerPid = $script:MinerPid
-                            miningDesired = $script:MiningDesired
-                            userStoppedManually = $script:UserStoppedManually
-                            apiAvailable = $script:ApiAvailable
-                            nvmlAvailable = $script:NvmlAvailable
-                            poolConnected = $script:PoolConnected
-                            poolUrl = $script:ActivePoolUrl
-                            uptimeSec = $script:UptimeSec
-                            totalHashrateMHs = $script:TotalHash
-                            acceptedShares = $script:SharesAcc
-                            rejectedShares = $script:SharesRej
-                            reconnectStage = $script:ReconnectStage
-                            restartAttempts = $script:RestartCount
-                            recoveryConfirmed = $script:RecoveryConfirmed
-                            gpus = @(
-                                @{
-                                    id = 0
-                                    hashrateMHs = $script:Gpu0Hash
-                                    tempC = $script:Gpu0Temp
-                                    powerWatts = $script:Gpu0Power
-                                    fanPercent = $script:Gpu0Fan
-                                    cclkMHz = $script:Gpu0CClkNow
-                                    mclkMHz = $script:Gpu0MClkNow
-                                },
-                                @{
-                                    id = 1
-                                    hashrateMHs = $script:Gpu1Hash
-                                    tempC = $script:Gpu1Temp
-                                    powerWatts = $script:Gpu1Power
-                                    fanPercent = $script:Gpu1Fan
-                                    cclkMHz = $script:Gpu1CClkNow
-                                    mclkMHz = $script:Gpu1MClkNow
-                                }
-                            )
-                        } | ConvertTo-Json -Depth 4
+                        $payload = $script:TelemetrySnapshot.Clone()
+                        $payload.minerProcessRunning = $script:IsMiningRunning
+                        $payload.minerPid = $script:MinerPid
+                        $payload.miningDesired = $script:MiningDesired
+                        $payload.userStoppedManually = $script:UserStoppedManually
+                        $payload.reconnectStage = $script:ReconnectStage
+                        $payload.restartAttempts = $script:RestartCount
+                        $payload.sharesAtRestart = $script:SharesAtRestart
+                        $payload.recoveryConfirmed = $script:RecoveryConfirmed
+                        $telemetryJson = $payload | ConvertTo-Json -Depth 5
                         $buf = [System.Text.Encoding]::UTF8.GetBytes($telemetryJson)
                         $res.StatusCode = 200
+                        $res.Headers["Cache-Control"] = "no-store"
                         $res.ContentType = "application/json; charset=utf-8"
                         $res.ContentLength64 = $buf.Length
                         $res.OutputStream.Write($buf, 0, $buf.Length)
@@ -781,6 +771,7 @@ $timer.Add_Tick({
                         $errJson = @{ ok = $false; error = "Команды управления через GET и внешняя смена кошелька заблокированы политикой безопасности." } | ConvertTo-Json
                         $buf = [System.Text.Encoding]::UTF8.GetBytes($errJson)
                         $res.StatusCode = 405
+                        $res.Headers["Cache-Control"] = "no-store"
                         $res.ContentType = "application/json; charset=utf-8"
                         $res.ContentLength64 = $buf.Length
                         $res.OutputStream.Write($buf, 0, $buf.Length)

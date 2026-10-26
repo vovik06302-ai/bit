@@ -188,8 +188,8 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
         <p className="text-xs text-slate-400 mt-1">{session?.configured ? `Выплаты: ${session.wallet}` : 'Подключение к локальному агенту…'}</p>
       </div>
       <div className="flex flex-wrap gap-2">
-        <button className={`${button} bg-slate-700 text-white`} disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Обновление…' : 'Обновить данные'}</button>
-        <button className={`${button} bg-slate-700 text-white`} onClick={toggleFullscreen}>{fullscreenActive ? 'Выйти из полного экрана' : 'Полный экран'}</button>
+        <button aria-label="Обновить реальные данные" title="Запросить свежие баланс, курс, счётчики и датчики" className={`${button} bg-cyan-600 text-white`} disabled={refreshing} onClick={refreshAll}>{refreshing ? '⟳ ОБНОВЛЕНИЕ…' : '⟳ ОБНОВИТЬ'}</button>
+        <button aria-label="Полный экран" title="Развернуть панель на весь экран" className={`${button} bg-slate-700 text-white`} onClick={toggleFullscreen}>{fullscreenActive ? 'ВЫЙТИ ИЗ ПОЛНОГО ЭКРАНА' : 'ПОЛНЫЙ ЭКРАН'}</button>
         <button className={`${button} bg-emerald-500 text-slate-950`} disabled={busy || pool.minerProcessRunning === true} onClick={() => command('start')}>Запустить</button>
         <button className={`${button} bg-rose-600 text-white`} disabled={busy || pool.minerProcessRunning !== true} onClick={() => command('stop')}>Остановить</button>
         {mode === 'overview' && <button className={`${button} bg-slate-700 text-white`} onClick={onConfigure}>Настроить GPU</button>}

@@ -2,8 +2,13 @@ name: Build Pearl Rig Installer (.EXE)
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag, for example v1.0.14
+        required: true
+        type: string
   release:
-    types: [ published, created ]
+    types: [published]
 
 permissions:
   contents: write
@@ -12,8 +17,10 @@ jobs:
   build-windows-installer:
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout release source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Generate Pearl Desktop Icon (pearl-icon.ico)
         shell: pwsh
@@ -36,21 +43,32 @@ jobs:
           $fs.Close()
           $bmp.Dispose()
 
-      - name: Prepare UTF-8 BOM for Inno Setup and Compile PearlRigControl-Setup.exe
+      - name: Prepare UTF-8 BOM and compile installer
         shell: pwsh
         run: |
           $utf8Bom = New-Object System.Text.UTF8Encoding($true)
           $issContent = Get-Content -LiteralPath "installer.iss" -Raw -Encoding UTF8
           [System.IO.File]::WriteAllText((Join-Path $PWD "installer.iss"), $issContent, $utf8Bom)
-
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y
           }
           & $iscc "installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path "Output/PearlRigControl-Setup.exe")) { throw "Installer EXE was not created" }
 
-      - name: Upload Installer Artifact
+      - name: Upload installer as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: PearlRigControl-Setup
           path: Output/PearlRigControl-Setup.exe
+          if-no-files-found: error
+
+      - name: Attach installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.event.release.tag_name }}
+          files: Output/PearlRigControl-Setup.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

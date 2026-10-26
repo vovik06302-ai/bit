@@ -60,11 +60,11 @@ export const SpeedometerGauge: React.FC<SpeedometerGaugeProps> = ({
   const warnRatio =
     warningThreshold !== undefined
       ? Math.min(Math.max((warningThreshold - min) / safeRange, 0), 1)
-      : 0.78;
+      : 1;
   const critRatio =
     criticalThreshold !== undefined
       ? Math.min(Math.max((criticalThreshold - min) / safeRange, 0), 1)
-      : 0.9;
+      : 1;
 
   const warnAngle = startAngle + warnRatio * totalSweep;
   const critAngle = startAngle + critRatio * totalSweep;

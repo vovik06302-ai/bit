@@ -11,7 +11,7 @@ export interface WatchdogStateInput {
   apiAvailable: boolean;
   nvmlAvailable: boolean;
   poolConnected: boolean | null;
-  totalHashrateMHs: number | null;
+  totalHashrateTHs: number | null;
   acceptedShares: number | null;
   gpuTempsC: [number | null, number | null];
   gpuPlWatts: [number, number];
@@ -159,7 +159,7 @@ export function evaluateWatchdogStep(
   // Статус Connected + ненулевой хешрейт + новая принятая шара
   if (state.reconnectStage === 'awaiting_confirmation') {
     const isConnected = state.poolConnected === true;
-    const hasHashrate = state.totalHashrateMHs !== null && state.totalHashrateMHs > 0;
+    const hasHashrate = state.totalHashrateTHs !== null && state.totalHashrateTHs > 0;
     const hasNewShare =
       state.acceptedShares !== null && state.acceptedShares > state.sharesAtRestart;
 
@@ -182,8 +182,8 @@ export function evaluateWatchdogStep(
     state.minerProcessRunning &&
     state.apiAvailable &&
     state.poolConnected === true &&
-    state.totalHashrateMHs !== null &&
-    state.totalHashrateMHs > 0;
+    state.totalHashrateTHs !== null &&
+    state.totalHashrateTHs > 0;
 
   if (poolHealthy) {
     return {
@@ -255,7 +255,7 @@ export function createEmptyGpuMetrics(): [GpuLiveMetrics, GpuLiveMetrics] {
     {
       id: 0,
       name: 'NVIDIA GeForce RTX 4070 Ti',
-      hashrateMHs: null,
+      hashrateTHs: null,
       acceptedShares: null,
       rejectedShares: null,
       staleShares: null,
@@ -266,7 +266,7 @@ export function createEmptyGpuMetrics(): [GpuLiveMetrics, GpuLiveMetrics] {
       fanPercent: null,
       fanRpm: null,
       powerWatts: null,
-      efficiencyHW: null,
+      efficiencyGHW: null,
       cclkMHz: null,
       mclkMHz: null,
       voltageMv: null,
@@ -278,7 +278,7 @@ export function createEmptyGpuMetrics(): [GpuLiveMetrics, GpuLiveMetrics] {
     {
       id: 1,
       name: 'NVIDIA GeForce RTX 4070 Ti',
-      hashrateMHs: null,
+      hashrateTHs: null,
       acceptedShares: null,
       rejectedShares: null,
       staleShares: null,
@@ -289,7 +289,7 @@ export function createEmptyGpuMetrics(): [GpuLiveMetrics, GpuLiveMetrics] {
       fanPercent: null,
       fanRpm: null,
       powerWatts: null,
-      efficiencyHW: null,
+      efficiencyGHW: null,
       cclkMHz: null,
       mclkMHz: null,
       voltageMv: null,
@@ -317,7 +317,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: false,
       nvmlAvailable: false,
       poolConnected: null,
-      totalHashrateMHs: null,
+      totalHashrateTHs: null,
       acceptedShares: null,
       gpuTempsC: [null, null],
       gpuPlWatts: [150, 150],
@@ -390,7 +390,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: false,
       nvmlAvailable: true,
       poolConnected: false,
-      totalHashrateMHs: 0,
+      totalHashrateTHs: 0,
       acceptedShares: 10,
       gpuTempsC: [42, 41],
       gpuPlWatts: [150, 150],
@@ -421,7 +421,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: true,
       nvmlAvailable: true,
       poolConnected: false,
-      totalHashrateMHs: 0,
+      totalHashrateTHs: 0,
       acceptedShares: 25,
       gpuTempsC: [56, 57],
       gpuPlWatts: [150, 150],
@@ -449,7 +449,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: true,
       nvmlAvailable: true,
       poolConnected: false,
-      totalHashrateMHs: 0,
+      totalHashrateTHs: 0,
       acceptedShares: 25,
       gpuTempsC: [56, 57],
       gpuPlWatts: [150, 150],
@@ -477,7 +477,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: true,
       nvmlAvailable: true,
       poolConnected: true,
-      totalHashrateMHs: 136.4,
+      totalHashrateTHs: 136.4,
       acceptedShares: 26, // новая шара после 25
       gpuTempsC: [56, 57],
       gpuPlWatts: [150, 150],
@@ -514,7 +514,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: true,
       nvmlAvailable: true,
       poolConnected: true,
-      totalHashrateMHs: 136.0,
+      totalHashrateTHs: 136.0,
       acceptedShares: 30,
       gpuTempsC: [72, 85],
       gpuPlWatts: [150, 150],
@@ -542,7 +542,7 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
       apiAvailable: true,
       nvmlAvailable: true,
       poolConnected: true,
-      totalHashrateMHs: 120.0,
+      totalHashrateTHs: 120.0,
       acceptedShares: 31,
       gpuTempsC: [74, 86],
       gpuPlWatts: [125, 125], // уже был снижен PL, но температура всё ещё >= 85 °C
@@ -568,8 +568,8 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
   // 9. Недоступный API
   const emptyMetrics = createEmptyGpuMetrics();
   const check9Passed =
-    emptyMetrics[0].hashrateMHs === null &&
-    emptyMetrics[1].hashrateMHs === null &&
+    emptyMetrics[0].hashrateTHs === null &&
+    emptyMetrics[1].hashrateTHs === null &&
     emptyMetrics[0].tempC === null &&
     emptyMetrics[1].tempC === null &&
     emptyMetrics[0].acceptedShares === null &&

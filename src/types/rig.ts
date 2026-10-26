@@ -11,9 +11,11 @@ export interface GpuSettings {
 
 export interface RigConfig {
   miningActive: boolean;
+  userStoppedManually: boolean;
   minerDir: string;
   logFilePath: string;
   walletAddress: string;
+  walletSaved: boolean;
   workerName: string;
   primaryPool: string;
   backupPool: string;
@@ -22,72 +24,70 @@ export interface RigConfig {
   gpus: [GpuSettings, GpuSettings];
 }
 
-export interface GitHubSyncConfig {
-  enabled: boolean;
-  owner: string;
-  repo: string;
-  branch: string;
-  isPrivate: boolean;
-  token: string;
-  pullIntervalMin: number;
-  autoApplyRemoteConfig: boolean;
-  autoSelfUpdateAgent: boolean;
-}
-
 export interface WatchdogPolicy {
   checkIntervalSec: number;
   minHashrateMHs: number;
   zeroHashrateRestartSec: number;
+  maxRestartAttempts: number;
   maxTempC: number;
+  criticalStopTempC: number;
   emergencyPlWatts: number;
-  autoBypassVpnTun: boolean;
-  fixHostsFakeIp: boolean;
-  autoElevateAdmin: boolean;
-  autoHealCrashes?: boolean;
-  autoResetGpuDriver?: boolean;
-  autoStepDownOcOnCrash?: boolean;
-  autoSwitchBackupPool?: boolean;
   telegramEnabled: boolean;
   telegramBotToken: string;
   telegramChatId: string;
-  github: GitHubSyncConfig;
 }
 
 export interface GpuLiveMetrics {
   id: number;
   name: string;
-  hashrateMHs: number;
-  acceptedShares: number;
-  rejectedShares: number;
-  staleShares: number;
-  lastShareSec: number;
-  tempC: number;
-  hotspotTempC: number;
-  vramTempC: number;
-  fanPercent: number;
-  fanRpm: number;
-  powerWatts: number;
-  efficiencyHW: number;
-  cclkMHz: number;
-  mclkMHz: number;
-  voltageMv: number;
-  vramUsedMb: number;
-  pState: string;
-  pcieLink: string;
-  status: 'nominal' | 'warning' | 'critical' | 'offline';
+  hashrateMHs: number | null;
+  acceptedShares: number | null;
+  rejectedShares: number | null;
+  staleShares: number | null;
+  lastShareSec: number | null;
+  tempC: number | null;
+  hotspotTempC: number | null;
+  vramTempC: number | null;
+  fanPercent: number | null;
+  fanRpm: number | null;
+  powerWatts: number | null;
+  efficiencyHW: number | null;
+  cclkMHz: number | null;
+  mclkMHz: number | null;
+  voltageMv: number | null;
+  vramUsedMb: number | null;
+  pState: string | null;
+  pcieLink: string | null;
+  status: 'nominal' | 'warning' | 'critical' | 'offline' | 'no_data';
+}
+
+export interface PoolLiveStatus {
+  connected: boolean | null;
+  poolUrl: string | null;
+  pingMs: number | null;
+  uptimeSec: number | null;
+  apiAvailable: boolean;
+  nvmlAvailable: boolean;
+  minerProcessRunning: boolean | null;
+  minerPid: number | null;
+  reconnectStage: 'idle' | 'native_wait' | 'restarting' | 'awaiting_confirmation' | 'limit_reached';
+  restartAttempts: number;
+  sharesAtRestart: number;
+  recoveryConfirmed: boolean;
+  lastError: string | null;
 }
 
 export interface WatchdogEvent {
   id: number | string;
   timestamp: string;
   category:
-    | 'AUTO_HEAL'
-    | 'VPN_BYPASS'
     | 'PROCESS'
+    | 'POOL'
     | 'THERMAL'
-    | 'TELEGRAM'
+    | 'WALLET'
+    | 'SECURITY'
     | 'OC_PROFILE'
-    | 'GITHUB_OTA';
+    | 'TELEGRAM';
   severity: 'info' | 'warning' | 'error';
   message: string;
   actionTaken: string;
@@ -98,4 +98,12 @@ export interface LogDiagnosticItem {
   title: string;
   detail: string;
   fixCommand: string;
+}
+
+export interface ScenarioCheckResult {
+  id: string;
+  title: string;
+  passed: boolean;
+  expected: string;
+  actual: string;
 }

@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+rig-local.json
+.runtime/
+work/
+
+bundle/
+Output/
+pearl-icon.ico

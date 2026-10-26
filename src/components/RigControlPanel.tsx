@@ -25,6 +25,7 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
   const [setup, setSetup] = useState({ wallet:'', minerExe:'C:\\Pearl\\miner\\onezerominer.exe', logFile:'C:\\Pearl\\miner.log' });
   const [refreshing, setRefreshing] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [fallbackFullscreen, setFallbackFullscreen] = useState(false);
   const [rates, setRates] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('pearl_panel_rates_v1') ?? '{}');
@@ -90,15 +91,24 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
   };
   const toggleFullscreen = async () => {
     try {
-      if (document.fullscreenElement) { await document.exitFullscreen(); setFullscreen(false); }
-      else { await document.documentElement.requestFullscreen(); setFullscreen(true); }
-    } catch (e) { setError(`Полноэкранный режим недоступен: ${(e as Error).message}`); }
+      if (document.fullscreenElement) { await document.exitFullscreen(); setFullscreen(false); return; }
+      if (fallbackFullscreen) { setFallbackFullscreen(false); return; }
+      if (typeof document.documentElement.requestFullscreen !== 'function') throw new Error('Fullscreen API недоступен');
+      await document.documentElement.requestFullscreen();
+      setFullscreen(true);
+    } catch {
+      // Резервный режим работает в браузерах/оболочках, где Fullscreen API запрещён.
+      setFallbackFullscreen(true);
+      setError('Включён резервный полноэкранный режим панели. Для выхода нажмите ту же кнопку или Esc.');
+    }
   };
   useEffect(() => {
     const update = () => setFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener('fullscreenchange', update);
-    return () => document.removeEventListener('fullscreenchange', update);
-  }, []);
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && fallbackFullscreen) setFallbackFullscreen(false); };
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('fullscreenchange', update); document.removeEventListener('keydown', escape); };
+  }, [fallbackFullscreen]);
   const loadSession = useCallback(async () => {
     const response = await fetch('/api/session', { cache: 'no-store' });
     if (!response.ok) throw new Error('Откройте локальную панель http://127.0.0.1:3000/');
@@ -170,15 +180,16 @@ export function RigControlPanel({ mode, gpus, pool, onSession, onConfigure, onRe
   const busy = job.busy || !session?.configured;
   const button = 'px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed';
 
-  return <div className="space-y-5">
+  const fullscreenActive = fullscreen || fallbackFullscreen;
+  return <div className={fullscreenActive ? 'fixed inset-0 z-[100] overflow-y-auto bg-[#0B0F17] p-6 space-y-5' : 'space-y-5'}>
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h2 className="text-xl font-bold text-white">{mode === 'overview' ? 'Доход и состояние рига' : 'Настройки видеокарт'}</h2>
         <p className="text-xs text-slate-400 mt-1">{session?.configured ? `Выплаты: ${session.wallet}` : 'Подключение к локальному агенту…'}</p>
       </div>
       <div className="flex flex-wrap gap-2">
-        <button className={`${button} bg-slate-700 text-white`} disabled={refreshing} onClick={refreshAll}>{refreshing ? 'Обновление…' : 'Обновить данные'}</button>
-        <button className={`${button} bg-slate-700 text-white`} onClick={toggleFullscreen}>{fullscreen ? 'Выйти из полного экрана' : 'Полный экран'}</button>
+        <button aria-label="Обновить реальные данные" title="Запросить свежие баланс, курс, счётчики и датчики" className={`${button} bg-cyan-600 text-white`} disabled={refreshing} onClick={refreshAll}>{refreshing ? '⟳ ОБНОВЛЕНИЕ…' : '⟳ ОБНОВИТЬ'}</button>
+        <button aria-label="Полный экран" title="Развернуть панель на весь экран" className={`${button} bg-slate-700 text-white`} onClick={toggleFullscreen}>{fullscreenActive ? 'ВЫЙТИ ИЗ ПОЛНОГО ЭКРАНА' : 'ПОЛНЫЙ ЭКРАН'}</button>
         <button className={`${button} bg-emerald-500 text-slate-950`} disabled={busy || pool.minerProcessRunning === true} onClick={() => command('start')}>Запустить</button>
         <button className={`${button} bg-rose-600 text-white`} disabled={busy || pool.minerProcessRunning !== true} onClick={() => command('stop')}>Остановить</button>
         {mode === 'overview' && <button className={`${button} bg-slate-700 text-white`} onClick={onConfigure}>Настроить GPU</button>}

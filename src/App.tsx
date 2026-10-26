@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   XCircle,
   Activity,
+  Flame,
 } from 'lucide-react';
 import {
   RigConfig,
@@ -28,6 +29,7 @@ import {
 } from './types/rig';
 import {
   validatePearlWallet,
+  DEFAULT_PEARL_WALLET,
   buildOneZeroMinerCommand,
   buildRemoteRigConfigJson,
   generateWatchdogBatScript,
@@ -48,6 +50,63 @@ const STORAGE_CONFIG_KEY = 'pearl_rig_config_v3';
 const STORAGE_POLICY_KEY = 'pearl_watchdog_policy_v3';
 const STORAGE_WALLET_KEY = 'pearl_saved_public_wallet_v3';
 
+// Диапазон ползунка мощности майнинга (Power Limit): RTX 4070 Ti TGP 285 Вт,
+// безопасный профиль майнинга — от аварийного минимума до заводского лимита.
+export const MINING_PL_MIN = 100;
+export const MINING_PL_MAX = 285;
+
+// Огненный градиент для шкал и ползунков мощности/температуры
+const FIRE_GRADIENT_CSS =
+  'linear-gradient(90deg, #FDE047 0%, #FACC15 22%, #FB923C 48%, #F97316 68%, #EF4444 100%)';
+
+function fireFillStyle(ratioPct: number): React.CSSProperties {
+  const r = Math.min(Math.max(ratioPct, 0), 100);
+  return {
+    backgroundImage: `${FIRE_GRADIENT_CSS}, linear-gradient(#1E293B, #1E293B)`,
+    backgroundSize: `${r}% 100%, ${100 - r}% 100%`,
+    backgroundPosition: 'left center, right center',
+    backgroundRepeat: 'no-repeat',
+  };
+}
+
+function fireThumbStyle(value: number, min: number, max: number): React.CSSProperties {
+  const pct = ((Math.min(Math.max(value, min), max) - min) / Math.max(0.0001, max - min)) * 100;
+  return { backgroundImage: fireFillStyle(pct) };
+}
+
+const FIRE_SLIDER_CSS = `
+input.fire-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 12px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: pointer;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.6);
+}
+input.fire-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #FFFFFF 0%, #FDBA74 45%, #EA580C 100%);
+  border: 2px solid #FFEDD5;
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.9), 0 2px 6px rgba(0,0,0,0.6);
+  cursor: grab;
+}
+input.fire-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #FFFFFF 0%, #FDBA74 45%, #EA580C 100%);
+  border: 2px solid #FFEDD5;
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.9), 0 2px 6px rgba(0,0,0,0.6);
+  cursor: grab;
+}
+`;
+
 function formatMetric(value: number | string | null | undefined, suffix = ''): string {
   if (value === null || value === undefined || value === '') {
     return 'нет данных';
@@ -62,17 +121,17 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('telemetry');
   const [previewFile, setPreviewFile] = useState<PreviewFileType>('bat');
 
-  // Загрузка локально сохранённого публичного адреса кошелька (игнорируя старый обрезанный адрес)
+  // Загрузка локально сохранённого публичного адреса кошелька (по умолчанию — адрес Pearl владельца рига)
   const initialSavedWallet = useMemo(() => {
     try {
       const raw = localStorage.getItem(STORAGE_WALLET_KEY);
-      if (!raw) return '';
+      if (!raw) return DEFAULT_PEARL_WALLET;
       const parsed = JSON.parse(raw);
       const addr = typeof parsed?.address === 'string' ? parsed.address.trim() : '';
       const check = validatePearlWallet(addr);
-      return check.valid ? addr : '';
+      return check.valid ? addr : DEFAULT_PEARL_WALLET;
     } catch {
-      return '';
+      return DEFAULT_PEARL_WALLET;
     }
   }, []);
 
@@ -317,10 +376,10 @@ export default function App() {
             staleShares: null,
             lastShareSec: null,
             tempC: typeof g0?.tempC === 'number' ? g0.tempC : null,
-            hotspotTempC: null,
-            vramTempC: null,
+            hotspotTempC: typeof g0?.hotspotTempC === 'number' ? g0.hotspotTempC : null,
+            vramTempC: typeof g0?.vramTempC === 'number' ? g0.vramTempC : null,
             fanPercent: typeof g0?.fanPercent === 'number' ? g0.fanPercent : null,
-            fanRpm: null,
+            fanRpm: typeof g0?.fanRpm === 'number' ? g0.fanRpm : null,
             powerWatts: typeof g0?.powerWatts === 'number' ? g0.powerWatts : null,
             efficiencyHW:
               typeof g0?.hashrateMHs === 'number' &&
@@ -350,10 +409,10 @@ export default function App() {
             staleShares: null,
             lastShareSec: null,
             tempC: typeof g1?.tempC === 'number' ? g1.tempC : null,
-            hotspotTempC: null,
-            vramTempC: null,
+            hotspotTempC: typeof g1?.hotspotTempC === 'number' ? g1.hotspotTempC : null,
+            vramTempC: typeof g1?.vramTempC === 'number' ? g1.vramTempC : null,
             fanPercent: typeof g1?.fanPercent === 'number' ? g1.fanPercent : null,
-            fanRpm: null,
+            fanRpm: typeof g1?.fanRpm === 'number' ? g1.fanRpm : null,
             powerWatts: typeof g1?.powerWatts === 'number' ? g1.powerWatts : null,
             efficiencyHW:
               typeof g1?.hashrateMHs === 'number' &&
@@ -771,6 +830,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col">
+      <style>{FIRE_SLIDER_CSS}</style>
       {/* Верхняя панель */}
       <header className="flex flex-wrap items-center justify-between gap-4 px-6 py-4 border-b border-slate-800 bg-[#0E1420]">
         <div className="flex items-center gap-3">
@@ -1248,6 +1308,122 @@ export default function App() {
                 />
               </div>
 
+              {/* Датчики температур видеокарт — по спидометру на каждую карту */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Flame className="w-4 h-4 text-orange-400" />
+                  <h3 className="text-sm font-bold text-white">
+                    Датчики температур видеокарт · стрелочные спидометры с циферблатом
+                  </h3>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {gpuMetrics.map((gpu, idx) => (
+                    <SpeedometerGauge
+                      key={`temp-gpu-${gpu.id}`}
+                      label={`Температура GPU #${gpu.id} · ${gpu.name}`}
+                      sublabel={`nvidia-smi -i ${idx} · профиль PL ${rigConfig.gpus[idx].pl} Вт`}
+                      value={gpu.tempC}
+                      min={25}
+                      max={100}
+                      warningThreshold={80}
+                      criticalThreshold={policy.maxTempC}
+                      unit="°C (ядро GPU)"
+                      decimals={0}
+                      size="lg"
+                      accent="fire"
+                      extraInfo={[
+                        {
+                          label: 'Горячая точка (Hotspot)',
+                          value: formatMetric(gpu.hotspotTempC, ' °C'),
+                          highlight:
+                            gpu.hotspotTempC !== null && gpu.hotspotTempC >= policy.criticalStopTempC
+                              ? 'err'
+                              : gpu.hotspotTempC !== null && gpu.hotspotTempC >= policy.maxTempC + 5
+                              ? 'warn'
+                              : 'ok',
+                        },
+                        {
+                          label: 'Память VRAM',
+                          value: formatMetric(gpu.vramTempC, ' °C'),
+                          highlight:
+                            gpu.vramTempC !== null && gpu.vramTempC >= 98
+                              ? 'err'
+                              : gpu.vramTempC !== null && gpu.vramTempC >= 90
+                              ? 'warn'
+                              : 'ok',
+                        },
+                        { label: 'Вентилятор', value: formatMetric(gpu.fanPercent, ' %') },
+                        { label: 'Обороты кулера', value: formatMetric(gpu.fanRpm, ' RPM') },
+                      ]}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Настройка мощности майнинга — ползунки Power Limit */}
+              <div className="p-5 rounded-xl border border-slate-800 bg-[#111827] space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                  <div>
+                    <h3 className="text-sm font-bold text-white">
+                      Настройка мощности майнинга (Power Limit --pl)
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Огненная шкала: жёлтый → оранжевый → красный. Диапазон {MINING_PL_MIN}–{MINING_PL_MAX} Вт
+                      (RTX 4070 Ti TGP 285 Вт). Значения попадают в BAT-скрипт и rig-config.json; при{' '}
+                      &ge; {policy.maxTempC} °C watchdog автоматически снизит PL до {policy.emergencyPlWatts} Вт.
+                    </p>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold uppercase tracking-wider bg-orange-500/15 text-orange-300 border border-orange-500/30 shrink-0">
+                    {Math.round(
+                      (((rigConfig.gpus[0].pl - MINING_PL_MIN) / (MINING_PL_MAX - MINING_PL_MIN)) * 100 +
+                        ((rigConfig.gpus[1].pl - MINING_PL_MIN) / (MINING_PL_MAX - MINING_PL_MIN)) * 100) /
+                        2
+                    )}
+                    % мощности
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  {rigConfig.gpus.map((gpu, idx) => (
+                    <div key={`pl-slider-${gpu.id}`} className="space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <label className="text-slate-300 font-semibold">
+                          GPU #{gpu.id} · {gpu.name}
+                        </label>
+                        <span className="font-mono font-bold text-orange-300">{gpu.pl} Вт</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={MINING_PL_MIN}
+                        max={MINING_PL_MAX}
+                        step={5}
+                        value={Math.min(Math.max(gpu.pl, MINING_PL_MIN), MINING_PL_MAX)}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setRigConfig((prev) => {
+                            const next: [typeof gpu, typeof gpu] = [...prev.gpus] as [
+                              typeof gpu,
+                              typeof gpu,
+                            ];
+                            next[idx] = { ...next[idx], pl: val };
+                            return { ...prev, gpus: next };
+                          });
+                        }}
+                        className="fire-slider"
+                        style={fireThumbStyle(gpu.pl, MINING_PL_MIN, MINING_PL_MAX)}
+                        aria-label={`Power Limit GPU #${gpu.id}, Ватт`}
+                      />
+                      <div className="flex justify-between text-[10px] font-mono text-slate-500">
+                        <span>{MINING_PL_MIN} Вт (эко)</span>
+                        <span>150 Вт (профиль)</span>
+                        <span>{MINING_PL_MAX} Вт (TGP)</span>
+                      </div>
+                      <div className="h-2 rounded-full overflow-hidden border border-slate-800" style={fireFillStyle(((gpu.pl - MINING_PL_MIN) / (MINING_PL_MAX - MINING_PL_MIN)) * 100)} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               {/* Детальные карточки обеих видеокарт RTX 4070 Ti */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 {gpuMetrics.map((gpu, idx) => (
@@ -1450,6 +1626,27 @@ export default function App() {
                               });
                             }}
                             className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
+                          />
+                          {/* Огненный ползунок мощности — синхронизирован с числовым полем */}
+                          <input
+                            type="range"
+                            min={MINING_PL_MIN}
+                            max={MINING_PL_MAX}
+                            step={5}
+                            value={Math.min(Math.max(gpu.pl, MINING_PL_MIN), MINING_PL_MAX)}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setRigConfig((prev) => {
+                                const next: [typeof gpu, typeof gpu] = [
+                                  ...prev.gpus,
+                                ] as [typeof gpu, typeof gpu];
+                                next[idx] = { ...next[idx], pl: val };
+                                return { ...prev, gpus: next };
+                              });
+                            }}
+                            className="fire-slider mt-1"
+                            style={fireThumbStyle(gpu.pl, MINING_PL_MIN, MINING_PL_MAX)}
+                            aria-label={`Ползунок Power Limit GPU #${gpu.id}, Ватт`}
                           />
                         </div>
 

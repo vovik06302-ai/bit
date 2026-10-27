@@ -25,8 +25,8 @@ $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$MinerDir = "C:\Users\User\Documents\Codex\2026-10-25\new-chat\outputs\Pearl\miner\onezerominer-win64-1.8.3"
-$LogFile = "C:\Users\User\Documents\Codex\2026-10-25\new-chat\work\pearl-miner.log"
+$MinerDir = "$env:LOCALAPPDATA\PearlRigControl\miner"
+$LogFile = "$env:LOCALAPPDATA\PearlRigControl\pearl-miner.log"
 $Worker = "dual4070ti"
 $Pool1 = "stratum+tcp://prl-ru.kryptex.network:7048"
 $Pool2 = "stratum+tcp://prl-eu.kryptex.network:7048"
@@ -40,8 +40,8 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.1.0"
-$UpdateRepo = "pearl-miner/pearl-rig-control"
+$AppVersion = "3.3.0"
+$UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false
 $script:DownloadActive = $false
@@ -59,6 +59,30 @@ $CurrentFan = "65,*"
 $LocalStateDir = "$env:LOCALAPPDATA\PearlRigControl"
 if (-not (Test-Path $LocalStateDir)) { New-Item -ItemType Directory -Path $LocalStateDir -Force | Out-Null }
 $LocalWalletFile = "$LocalStateDir\wallet-local.json"
+$LocalSettingsFile = "$LocalStateDir\rig-settings.json"
+$script:ElectricityTariff = 0.0
+$script:TotalGpuKWh = 0.0
+$script:LastPowerSampleAt = $null
+$script:LastPowerSampleWatts = $null
+$script:LastEnergySaveAt = $null
+$script:PoolConfirmed = $null
+$script:PoolPending = $null
+$script:PoolBalance = $null
+$script:PayoutThreshold = $null
+$script:PoolBalanceError = $null
+$script:PoolBalanceFetchedAt = $null
+$script:PrlUsd = $null
+$script:UsdRub = $null
+$script:PrlRub = $null
+$script:MarketRatesFetchedAt = $null
+if (Test-Path -LiteralPath $LocalSettingsFile) {
+    try {
+        $localSettings = Get-Content -LiteralPath $LocalSettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($localSettings.electricityTariff -is [ValueType] -and [double]$localSettings.electricityTariff -ge 0) { $script:ElectricityTariff = [double]$localSettings.electricityTariff }
+        if ($localSettings.totalGpuKWh -is [ValueType] -and [double]$localSettings.totalGpuKWh -ge 0) { $script:TotalGpuKWh = [double]$localSettings.totalGpuKWh }
+        if ($localSettings.minerDir -and (Test-Path -LiteralPath (Join-Path ([string]$localSettings.minerDir) 'onezerominer.exe'))) { $MinerDir = [string]$localSettings.minerDir }
+    } catch {}
+}
 
 # Публичный адрес кошелька Pearl по умолчанию (только адрес выплат, без секретных ключей)
 $DefaultWallet = "[REMOVED_LOCAL_WALLET]"
@@ -132,7 +156,7 @@ function Convert-PearlTelemetry($ApiResponse, $NvidiaLines, [double]$NowUnix = [
     $nv = @{}
     foreach ($line in $NvidiaLines) {
         $parts = $line -split ','
-        if ($parts.Count -ne 8) { continue }
+        if ($parts.Count -ne 7) { continue }
         $index = ConvertTo-PearlNumber $parts[0].Trim()
         if ($null -eq $index -or $index -notin @(0,1)) { continue }
         $bus = $null
@@ -146,7 +170,6 @@ function Convert-PearlTelemetry($ApiResponse, $NvidiaLines, [double]$NowUnix = [
             fanPercent = ConvertTo-PearlNumber $parts[4].Trim()
             cclkMHz = ConvertTo-PearlNumber $parts[5].Trim()
             mclkMHz = ConvertTo-PearlNumber $parts[6].Trim()
-            vramTempC = ConvertTo-PearlNumber $parts[7].Trim()
         }
     }
     $gpus = foreach ($id in @(0,1)) {
@@ -176,8 +199,8 @@ function Convert-PearlTelemetry($ApiResponse, $NvidiaLines, [double]$NowUnix = [
             id = $id; name = if ($device.name) { $device.name } else { "GPU $id" }
             hashrateTHs = if ($null -ne $rate) { $rate / 1e12 } else { $null }
             acceptedShares = $accepted; rejectedShares = $rejected
-            tempC = $sensors.tempC; powerWatts = $sensors.powerWatts; fanPercent = $sensors.fanPercent
-            cclkMHz = $sensors.cclkMHz; mclkMHz = $sensors.mclkMHz; vramTempC = $sensors.vramTempC
+            tempC = $sensors.tempC; vramTempC = ConvertTo-PearlNumber $device.mem_temp; powerWatts = $sensors.powerWatts; fanPercent = $sensors.fanPercent
+            cclkMHz = $sensors.cclkMHz; mclkMHz = $sensors.mclkMHz
             sensorSource = if ($nv.ContainsKey($id)) { 'nvidia-smi' } elseif ($device) { 'miner-api' } else { $null }
         }
     }
@@ -240,13 +263,18 @@ if (Test-Path $LocalWalletFile) {
 # ОКНО УПРАВЛЕНИЯ PEARL RIG CONTROL (БЕЗ АВТОЗАПУСКА И СИМУЛЯЦИИ)
 # ============================================================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Pearl Rig Control v3.0.1 [$Worker] - Dual RTX 4070 Ti"
-$form.Size = New-Object System.Drawing.Size(1120, 780)
+$form.Text = "Pearl Rig Control v$AppVersion [$Worker] - Dual RTX 4070 Ti"
+$form.Size = New-Object System.Drawing.Size(1200, 900)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
 $form.ForeColor = [System.Drawing.Color]::FromArgb(241, 245, 249)
-$form.FormBorderStyle = "FixedSingle"
-$form.MaximizeBox = $false
+$form.FormBorderStyle = "Sizable"
+$form.MaximizeBox = $true
+$form.KeyPreview = $true
+$script:IsFullscreen = $false
+$script:SavedFormBounds = $null
+$script:SavedFormBorderStyle = $null
+$script:SavedWindowState = $null
 
 $lblTitle = New-Object System.Windows.Forms.Label
 $lblTitle.Text = "PEARL RIG CONTROL · DUAL RTX 4070 Ti (PL 150W | CClk 2400 | MClk 810 | Kernel 2)"
@@ -348,9 +376,9 @@ $btnStop.Size = New-Object System.Drawing.Size(160, 38)
 $form.Controls.Add($btnStop)
 
 $btnRefreshNow = New-Object System.Windows.Forms.Button
-$btnRefreshNow.Text = "Обновить датчики (API :3001 + nvidia-smi)"
-$btnRefreshNow.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$btnRefreshNow.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
+$btnRefreshNow.Text = "⟳ ОБНОВИТЬ ДАННЫЕ"
+$btnRefreshNow.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$btnRefreshNow.BackColor = [System.Drawing.Color]::FromArgb(8, 145, 178)
 $btnRefreshNow.ForeColor = [System.Drawing.Color]::White
 $btnRefreshNow.FlatStyle = "Flat"
 $btnRefreshNow.Location = New-Object System.Drawing.Point(410, 170)
@@ -362,12 +390,12 @@ $lblVersion = New-Object System.Windows.Forms.Label
 $lblVersion.Text = "Версия агента: v$AppVersion"
 $lblVersion.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
 $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
-$lblVersion.Location = New-Object System.Drawing.Point(700, 178)
+$lblVersion.Location = New-Object System.Drawing.Point(345, 214)
 $lblVersion.Size = New-Object System.Drawing.Size(200, 22)
 $form.Controls.Add($lblVersion)
 
 $btnCheckUpdate = New-Object System.Windows.Forms.Button
-$btnCheckUpdate.Text = "Проверить обновления"
+$btnCheckUpdate.Text = "ПРОВЕРИТЬ ОБНОВЛЕНИЯ"
 $btnCheckUpdate.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
 $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
 $btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
@@ -376,13 +404,50 @@ $btnCheckUpdate.Location = New-Object System.Drawing.Point(905, 174)
 $btnCheckUpdate.Size = New-Object System.Drawing.Size(180, 30)
 $form.Controls.Add($btnCheckUpdate)
 
+$btnFullscreen = New-Object System.Windows.Forms.Button
+$btnFullscreen.Text = "ПОЛНЫЙ ЭКРАН"
+$btnFullscreen.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnFullscreen.BackColor = [System.Drawing.Color]::FromArgb(51, 65, 85)
+$btnFullscreen.ForeColor = [System.Drawing.Color]::White
+$btnFullscreen.FlatStyle = "Flat"
+$btnFullscreen.Location = New-Object System.Drawing.Point(700, 170)
+$btnFullscreen.Size = New-Object System.Drawing.Size(190, 38)
+$form.Controls.Add($btnFullscreen)
+
 $lblUpdateInfo = New-Object System.Windows.Forms.Label
 $lblUpdateInfo.Text = ""
 $lblUpdateInfo.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
 $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
-$lblUpdateInfo.Location = New-Object System.Drawing.Point(20, 214)
-$lblUpdateInfo.Size = New-Object System.Drawing.Size(1065, 20)
+$lblUpdateInfo.Location = New-Object System.Drawing.Point(520, 214)
+$lblUpdateInfo.Size = New-Object System.Drawing.Size(565, 20)
 $form.Controls.Add($lblUpdateInfo)
+
+$lblTariff = New-Object System.Windows.Forms.Label
+$lblTariff.Text = "Тариф ₽/кВт·ч"
+$lblTariff.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$lblTariff.ForeColor = [System.Drawing.Color]::FromArgb(203, 213, 225)
+$lblTariff.Location = New-Object System.Drawing.Point(20, 214)
+$lblTariff.Size = New-Object System.Drawing.Size(105, 24)
+$form.Controls.Add($lblTariff)
+
+$txtTariff = New-Object System.Windows.Forms.TextBox
+$txtTariff.Text = if ($script:ElectricityTariff -gt 0) { $script:ElectricityTariff.ToString([Globalization.CultureInfo]::InvariantCulture) } else { "" }
+$txtTariff.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+$txtTariff.Location = New-Object System.Drawing.Point(126, 212)
+$txtTariff.Size = New-Object System.Drawing.Size(80, 26)
+$txtTariff.BackColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
+$txtTariff.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($txtTariff)
+
+$btnSaveTariff = New-Object System.Windows.Forms.Button
+$btnSaveTariff.Text = "Сохранить тариф"
+$btnSaveTariff.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$btnSaveTariff.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
+$btnSaveTariff.ForeColor = [System.Drawing.Color]::White
+$btnSaveTariff.FlatStyle = "Flat"
+$btnSaveTariff.Location = New-Object System.Drawing.Point(214, 211)
+$btnSaveTariff.Size = New-Object System.Drawing.Size(120, 28)
+$form.Controls.Add($btnSaveTariff)
 
 $pbarDownload = New-Object System.Windows.Forms.ProgressBar
 $pbarDownload.Style = "Continuous"
@@ -390,7 +455,7 @@ $pbarDownload.Minimum = 0
 $pbarDownload.Maximum = 100
 $pbarDownload.Value = 0
 $pbarDownload.Visible = $false
-$pbarDownload.Location = New-Object System.Drawing.Point(20, 238)
+$pbarDownload.Location = New-Object System.Drawing.Point(20, 242)
 $pbarDownload.Size = New-Object System.Drawing.Size(1065, 18)
 $form.Controls.Add($pbarDownload)
 
@@ -576,15 +641,35 @@ function Start-AgentUpdateDownload {
 }
 
 # БЛОК 3: Карточки реальной телеметрии (без выдуманных чисел)
-$lblTelemetryBox = New-Object System.Windows.Forms.Label
-$lblTelemetryBox.Font = New-Object System.Drawing.Font("Consolas", 9.5)
+$lblTelemetryBox = New-Object System.Windows.Forms.Panel
+$lblTelemetryBox.Font = New-Object System.Drawing.Font("Consolas", 9)
 $lblTelemetryBox.BackColor = [System.Drawing.Color]::FromArgb(15, 23, 42)
 $lblTelemetryBox.ForeColor = [System.Drawing.Color]::FromArgb(226, 232, 240)
 $lblTelemetryBox.BorderStyle = "FixedSingle"
-$lblTelemetryBox.Location = New-Object System.Drawing.Point(20, 264)
-$lblTelemetryBox.Size = New-Object System.Drawing.Size(1065, 280)
+$lblTelemetryBox.Location = New-Object System.Drawing.Point(20, 270)
+$lblTelemetryBox.Size = New-Object System.Drawing.Size(1160, 250)
 $lblTelemetryBox.Padding = New-Object System.Windows.Forms.Padding(12)
 $form.Controls.Add($lblTelemetryBox)
+
+$lblEarningsPanel = New-Object System.Windows.Forms.Label
+$lblEarningsPanel.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+$lblEarningsPanel.BackColor = [System.Drawing.Color]::FromArgb(15, 23, 42)
+$lblEarningsPanel.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+$lblEarningsPanel.BorderStyle = "FixedSingle"
+$lblEarningsPanel.Location = New-Object System.Drawing.Point(20, 532)
+$lblEarningsPanel.Size = New-Object System.Drawing.Size(570, 115)
+$lblEarningsPanel.Padding = New-Object System.Windows.Forms.Padding(10)
+$form.Controls.Add($lblEarningsPanel)
+
+$lblPowerPanel = New-Object System.Windows.Forms.Label
+$lblPowerPanel.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+$lblPowerPanel.BackColor = [System.Drawing.Color]::FromArgb(24, 24, 27)
+$lblPowerPanel.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+$lblPowerPanel.BorderStyle = "FixedSingle"
+$lblPowerPanel.Location = New-Object System.Drawing.Point(600, 532)
+$lblPowerPanel.Size = New-Object System.Drawing.Size(580, 115)
+$lblPowerPanel.Padding = New-Object System.Windows.Forms.Padding(10)
+$form.Controls.Add($lblPowerPanel)
 
 # БЛОК 4: Журнал событий и ошибок
 $txtLog = New-Object System.Windows.Forms.TextBox
@@ -594,9 +679,132 @@ $txtLog.ScrollBars = "Vertical"
 $txtLog.BackColor = [System.Drawing.Color]::FromArgb(5, 8, 14)
 $txtLog.ForeColor = [System.Drawing.Color]::FromArgb(203, 213, 225)
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$txtLog.Location = New-Object System.Drawing.Point(20, 510)
-$txtLog.Size = New-Object System.Drawing.Size(1065, 215)
+$txtLog.Location = New-Object System.Drawing.Point(20, 660)
+$txtLog.Size = New-Object System.Drawing.Size(1160, 190)
 $form.Controls.Add($txtLog)
+
+function Update-WindowLayout {
+    $w = $form.ClientSize.Width
+    $h = $form.ClientSize.Height
+    if ($w -lt 900 -or $h -lt 650) { return }
+    $right = $w - 20
+    $lblTitle.Width = $w - 40
+    $lblStatus.Width = $w - 40
+    $grpWallet.Width = $w - 40
+    $lblWalletHeader.Width = $grpWallet.ClientSize.Width - 24
+    $btnEditWallet.Left = $grpWallet.ClientSize.Width - $btnEditWallet.Width - 12
+    $btnSaveWallet.Left = $btnEditWallet.Left - $btnSaveWallet.Width - 8
+    $btnCheckWallet.Left = $btnSaveWallet.Left - $btnCheckWallet.Width - 8
+    $txtWallet.Width = [Math]::Max(240, $btnCheckWallet.Left - $txtWallet.Left - 10)
+    $lblWalletHint.Width = $grpWallet.ClientSize.Width - 24
+    $btnCheckUpdate.Left = $right - $btnCheckUpdate.Width
+    $btnFullscreen.Left = $btnCheckUpdate.Left - $btnFullscreen.Width - 12
+    $lblVersion.Left = 345
+    $lblUpdateInfo.Left = 520
+    $lblUpdateInfo.Width = [Math]::Max(300, $w - $lblUpdateInfo.Left - 20)
+    $pbarDownload.Width = $w - 40
+    $telemetryHeight = 250
+    $lblTelemetryBox.Width = $w - 40
+    $lblTelemetryBox.Height = $telemetryHeight
+    $gap = 10
+    $half = [int](($w - 50 - $gap) / 2)
+    $lblEarningsPanel.Left = 20
+    $lblEarningsPanel.Top = $lblTelemetryBox.Bottom + 12
+    $lblEarningsPanel.Width = $half
+    $lblEarningsPanel.Height = 115
+    $lblPowerPanel.Left = $lblEarningsPanel.Right + $gap
+    $lblPowerPanel.Top = $lblEarningsPanel.Top
+    $lblPowerPanel.Width = $half
+    $lblPowerPanel.Height = 115
+    $txtLog.Left = 20
+    $txtLog.Top = $lblEarningsPanel.Bottom + 12
+    $txtLog.Width = $w - 40
+    $txtLog.Height = [Math]::Max(100, $h - $txtLog.Top - 20)
+}
+
+$script:DashboardData = $null
+$lblTelemetryBox.Add_Paint({
+    $g = $_.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $data = $script:DashboardData
+    if (-not $data) { return }
+    $gap = 10
+    $tileW = [int](($lblTelemetryBox.ClientSize.Width - 20 - 3 * $gap) / 4)
+    $tileH = $lblTelemetryBox.ClientSize.Height - 16
+    $tiles = @(
+        @{ x = 8; title = "ОБЩИЙ ХЕШРЕЙТ РИГА"; accent = [System.Drawing.Color]::FromArgb(16,185,129); value = $data.totalHashText; line1 = "PearlHash · $($data.processText)"; line2 = "Принято: $($data.acceptedText)   Отклонено: $($data.rejectedText)"; line3 = "Пул: $($data.poolText)" },
+        @{ x = 8 + ($tileW + $gap); title = "GPU #0 · RTX 4070 Ti"; accent = [System.Drawing.Color]::FromArgb(34,211,238); value = $data.gpu0HashText; line1 = "Ядро: $($data.gpu0TempText)   VRAM: $($data.gpu0VramTempText)"; line2 = "Вентилятор: $($data.gpu0FanText)   Частоты: $($data.gpu0ClocksText)"; line3 = "Мощность: $($data.gpu0PowerText) · Шары: $($data.gpu0SharesText)" },
+        @{ x = 8 + 2 * ($tileW + $gap); title = "GPU #1 · RTX 4070 Ti"; accent = [System.Drawing.Color]::FromArgb(56,189,248); value = $data.gpu1HashText; line1 = "Ядро: $($data.gpu1TempText)   VRAM: $($data.gpu1VramTempText)"; line2 = "Вентилятор: $($data.gpu1FanText)   Частоты: $($data.gpu1ClocksText)"; line3 = "Мощность: $($data.gpu1PowerText) · Шары: $($data.gpu1SharesText)" },
+        @{ x = 8 + 3 * ($tileW + $gap); title = "GPU ОБЩАЯ МОЩНОСТЬ"; accent = [System.Drawing.Color]::FromArgb(251,191,36); value = $data.totalPowerText; line1 = "Только измерения nvidia-smi"; line2 = "Накоплено GPU: $($data.energyText)"; line3 = "Энергия по тарифу: $($data.energyCostText)" }
+    )
+    $fontTitle = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $fontValue = New-Object System.Drawing.Font("Consolas", 16, [System.Drawing.FontStyle]::Bold)
+    $fontLine = New-Object System.Drawing.Font("Consolas", 8)
+    $fontGauge = New-Object System.Drawing.Font("Consolas", 8, [System.Drawing.FontStyle]::Bold)
+    $brushWhite = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(241,245,249))
+    $brushMuted = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(148,163,184))
+    $brushGreen = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(52,211,153))
+    $penBack = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(51,65,85), 8)
+    try {
+        foreach ($tile in $tiles) {
+            $rect = New-Object System.Drawing.Rectangle([int]$tile.x, 8, $tileW, $tileH)
+            $bg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(15,23,42))
+            $g.FillRectangle($bg, $rect); $bg.Dispose()
+            $accentPen = New-Object System.Drawing.Pen($tile.accent, 3)
+            $g.DrawLine($accentPen, $rect.Left, $rect.Top, $rect.Right, $rect.Top); $accentPen.Dispose()
+            $g.DrawString([string]$tile.title, $fontTitle, $brushWhite, [single]($rect.Left+10), [single]($rect.Top+10))
+            $valueX = $rect.Left + 12
+            $valueY = $rect.Top + 54
+            $g.DrawString([string]$tile.value, $fontValue, $brushWhite, [single]$valueX, [single]$valueY)
+            $lineY = $rect.Bottom - 68
+            $g.DrawString([string]$tile.line1, $fontLine, $brushMuted, [single]($rect.Left+10), [single]$lineY)
+            $g.DrawString([string]$tile.line2, $fontLine, $brushMuted, [single]($rect.Left+10), [single]($lineY+19))
+            $g.DrawString([string]$tile.line3, $fontLine, $brushGreen, [single]($rect.Left+10), [single]($lineY+38))
+            if ($tile.title -like 'GPU #*') {
+                $gpuId = if ($tile.title.StartsWith('GPU #0')) { 0 } else { 1 }
+                $hash = if ($gpuId -eq 0) { $data.gpu0HashRaw } else { $data.gpu1HashRaw }
+                if ($null -ne $hash -and $hash -ge 0) {
+                    $gx = $rect.Right - 104; $gy = $rect.Top + 43
+                    $gauge = New-Object System.Drawing.Rectangle($gx, $gy, 78, 78)
+                    $g.DrawArc($penBack, $gauge, 135, 270)
+                    $arc = [Math]::Max(0,[Math]::Min(1,[double]$hash / 100.0)) * 270
+                    $penGauge = New-Object System.Drawing.Pen($tile.accent, 8)
+                    $penGauge.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+                    $penGauge.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+                    $g.DrawArc($penGauge, $gauge, 135, [single]$arc); $penGauge.Dispose()
+                    $g.DrawString("TH/s", $fontGauge, $brushMuted, [single]($gx+20), [single]($gy+31))
+                }
+            }
+        }
+    } finally {
+        $fontTitle.Dispose(); $fontValue.Dispose(); $fontLine.Dispose(); $fontGauge.Dispose()
+        $brushWhite.Dispose(); $brushMuted.Dispose(); $brushGreen.Dispose(); $penBack.Dispose()
+    }
+})
+
+function Toggle-Fullscreen {
+    if (-not $script:IsFullscreen) {
+        $script:SavedFormBounds = $form.Bounds
+        $script:SavedFormBorderStyle = $form.FormBorderStyle
+        $script:SavedWindowState = $form.WindowState
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
+        $script:IsFullscreen = $true
+        $btnFullscreen.Text = "ВЫЙТИ ИЗ ПОЛНОГО ЭКРАНА (ESC)"
+    } else {
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        $form.FormBorderStyle = $script:SavedFormBorderStyle
+        $form.Bounds = $script:SavedFormBounds
+        $form.WindowState = $script:SavedWindowState
+        $script:IsFullscreen = $false
+        $btnFullscreen.Text = "ПОЛНЫЙ ЭКРАН"
+    }
+    Update-WindowLayout
+}
+$form.Add_Resize({ Update-WindowLayout })
+$form.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:IsFullscreen) { Toggle-Fullscreen } })
+$btnFullscreen.Add_Click({ Toggle-Fullscreen })
 
 function Write-AgentLog([string]$Level, [string]$Msg) {
     $ts = (Get-Date).ToString("HH:mm:ss")
@@ -637,38 +845,105 @@ function Format-Metric($val, [string]$suffix = "") {
     return "$val$suffix"
 }
 
+function Update-PoolBalance {
+    $walletCheck = Test-PearlWalletFormat $script:Wallet
+    if (-not $walletCheck.Valid) { return }
+    try {
+        $balance = Invoke-RestMethod -Uri "https://pool.kryptex.com/prl/api/v1/miner/balance/$($script:Wallet)" -TimeoutSec 4 -ErrorAction Stop
+        $script:PoolConfirmed = ConvertTo-PearlNumber $balance.confirmed
+        $script:PoolPending = ConvertTo-PearlNumber $balance.unconfirmed
+        $script:PoolBalance = ConvertTo-PearlNumber $balance.total
+        $script:PayoutThreshold = ConvertTo-PearlNumber $balance.threshold
+        $script:PoolBalanceFetchedAt = Get-Date
+        $script:PoolBalanceError = $null
+        $script:LastPoolErrorLogged = $null
+        try {
+            $stats = Invoke-RestMethod -Uri "https://pool.kryptex.com/prl/api/v1/miner/payouts/$($script:Wallet)/stats" -TimeoutSec 4 -ErrorAction Stop
+            $script:PoolPaid = ConvertTo-PearlNumber $stats.paid
+        } catch { $script:PoolPaid = $null }
+    } catch {
+        $script:PoolBalanceError = $_.Exception.Message
+        if ($script:LastPoolErrorLogged -ne $script:PoolBalanceError) {
+            Write-AgentLog "ERROR" "Kryptex API balance: $($script:PoolBalanceError)"
+            $script:LastPoolErrorLogged = $script:PoolBalanceError
+        }
+    }
+}
+
+function Update-OfficialRates {
+    try {
+        $chart = Invoke-RestMethod -Uri "https://pool.kryptex.com/api/v1/coin/prl/price/chart" -TimeoutSec 4 -ErrorAction Stop
+        $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $point = @($chart | Where-Object { $_.timestamp -le $nowMs -and $_.price -gt 0 } | Sort-Object timestamp | Select-Object -Last 1)
+        if ($point.Count -eq 0) { throw "Kryptex returned no current PRL price" }
+        $usdResponse = Invoke-WebRequest -Uri "https://www.cbr.ru/scripts/XML_daily.asp" -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop
+        [xml]$cbr = $usdResponse.Content
+        $usd = @($cbr.ValCurs.Valute | Where-Object { $_.CharCode -eq "USD" } | Select-Object -First 1)
+        if ($usd.Count -eq 0) { throw "Банк России не вернул USD/RUB" }
+        $usdRub = [double]::Parse(([string]$usd[0].Value).Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture)
+        $script:PrlUsd = [double]$point[0].price
+        $script:UsdRub = $usdRub
+        $script:PrlRub = $script:PrlUsd * $script:UsdRub
+        $script:MarketRatesFetchedAt = Get-Date
+        $script:MarketRatesError = $null
+        $script:LastRatesErrorLogged = $null
+    } catch {
+        $script:MarketRatesError = $_.Exception.Message
+        if ($script:LastRatesErrorLogged -ne $script:MarketRatesError) {
+            Write-AgentLog "ERROR" "Не удалось получить PRL/USD с Kryptex и USD/RUB с Банка России: $($script:MarketRatesError)"
+            $script:LastRatesErrorLogged = $script:MarketRatesError
+        }
+    }
+}
+
+function Save-LocalRigSettings {
+    $payload = @{ electricityTariff = $script:ElectricityTariff; totalGpuKWh = $script:TotalGpuKWh; minerDir = $MinerDir; updatedAt = (Get-Date).ToString("o") } | ConvertTo-Json
+    [System.IO.File]::WriteAllText($LocalSettingsFile, $payload, [System.Text.Encoding]::UTF8)
+}
+
 function Update-TelemetryDisplay {
     $poolStr = if ($null -eq $script:PoolConnected) { "нет данных" } elseif ($script:PoolConnected) { "Connected ($($script:ActivePoolUrl))" } else { "Disconnected" }
     $apiStr = if ($script:ApiAvailable) { "Доступен (127.0.0.1:$ApiPort)" } else { "нет данных (API 127.0.0.1:$ApiPort недоступен)" }
     $nvmlStr = if ($script:NvmlAvailable) { "nvidia-smi (реальные датчики)" } elseif ($script:ApiAvailable) { "API майнера (nvidia-smi недоступен)" } else { "нет данных" }
     $procStr = if ($script:IsMiningRunning) { "Работает (PID: $($script:MinerPid))" } elseif ($script:UserStoppedManually) { "Намеренно остановлен пользователем (Стоп)" } else { "Не запущен" }
 
-    $lines = @(
-        "СОСТОЯНИЕ ПРОЦЕССА И ИСТОЧНИКОВ ДАННЫХ:",
-        "  Процесс OneZeroMiner : $procStr",
-        "  API OneZeroMiner     : $apiStr",
-        "  Датчики nvidia-smi   : $nvmlStr",
-        "  Статус пула Kryptex  : $poolStr",
-        "  Этап переподключения : $($script:ReconnectStage) (Попыток перезапуска: $($script:RestartCount)/$MaxRestartAttempts | Подтверждение восстановления: $($script:RecoveryConfirmed))",
-        "",
-        "ПОКАЗАТЕЛИ МАЙНИНГА (из API http://127.0.0.1:$ApiPort):",
-        "  Суммарный хешрейт    : $(Format-Metric $script:TotalHash ' TH/s')   (GPU #0: $(Format-Metric $script:Gpu0Hash ' TH/s') | GPU #1: $(Format-Metric $script:Gpu1Hash ' TH/s'))",
-        "  GPU #0 шары         : $(Format-Metric $script:TelemetrySnapshot.gpus[0].acceptedShares) / $(Format-Metric $script:TelemetrySnapshot.gpus[0].rejectedShares)  | GPU #1: $(Format-Metric $script:TelemetrySnapshot.gpus[1].acceptedShares) / $(Format-Metric $script:TelemetrySnapshot.gpus[1].rejectedShares)",
-        "  Шар принято / откл.  : $(Format-Metric $script:SharesAcc) / $(Format-Metric $script:SharesRej)   | Время работы майнера: $(Format-Metric $script:UptimeSec ' сек')",
-        "",
-        "ДАТЧИКИ ВИДЕОКАРТ (источник: $nvmlStr; профиль: PL 150W, MClk 810 MHz, CClk 2400 MHz, Kernel 2, Fan 65%/*):",
-        "  GPU #0 (RTX 4070 Ti) : Темп: $(Format-Metric $script:Gpu0Temp ' °C') | Мощность: $(Format-Metric $script:Gpu0Power ' Вт') | Кулер: $(Format-Metric $script:Gpu0Fan ' %') | Частоты: $(Format-Metric $script:Gpu0CClkNow)/$(Format-Metric $script:Gpu0MClkNow) MHz",
-        "  GPU #1 (RTX 4070 Ti) : Темп: $(Format-Metric $script:Gpu1Temp ' °C') | Мощность: $(Format-Metric $script:Gpu1Power ' Вт') | Кулер: $(Format-Metric $script:Gpu1Fan ' %') | Частоты: $(Format-Metric $script:Gpu1CClkNow)/$(Format-Metric $script:Gpu1MClkNow) MHz"
-    )
-    $lblTelemetryBox.Text = ($lines -join "`r`n")
+    $g0 = $script:TelemetrySnapshot.gpus[0]
+    $g1 = $script:TelemetrySnapshot.gpus[1]
+    $totalPower = if ($null -ne $script:Gpu0Power -and $null -ne $script:Gpu1Power) { [double]$script:Gpu0Power + [double]$script:Gpu1Power } else { $null }
+    $totalPowerKwText = if ($null -eq $totalPower) { "нет данных" } else { Format-Metric ($totalPower / 1000) ' кВт' }
+    $energyCost = if ($script:ElectricityTariff -gt 0) { $script:TotalGpuKWh * $script:ElectricityTariff } else { $null }
+    $script:DashboardData = @{
+        totalHashText = "$(Format-Metric $script:TotalHash ' TH/s')"
+        totalPowerText = if ($null -eq $totalPower) { "нет данных" } else { "$(Format-Metric $totalPower ' Вт')  ($totalPowerKwText)" }
+        acceptedText = Format-Metric $script:SharesAcc; rejectedText = Format-Metric $script:SharesRej; poolText = $poolStr
+        gpu0HashText = "$(Format-Metric $script:Gpu0Hash ' TH/s')"; gpu0HashRaw = $script:Gpu0Hash
+        gpu0TempText = Format-Metric $script:Gpu0Temp ' °C'; gpu0VramTempText = Format-Metric $g0.vramTempC ' °C'; gpu0PowerText = Format-Metric $script:Gpu0Power ' Вт'
+        gpu0FanText = Format-Metric $script:Gpu0Fan ' %'; gpu0ClocksText = "$(Format-Metric $script:Gpu0CClkNow)/$(Format-Metric $script:Gpu0MClkNow) MHz"
+        gpu0SharesText = "$(Format-Metric $g0.acceptedShares) / $(Format-Metric $g0.rejectedShares)"
+        gpu1HashText = "$(Format-Metric $script:Gpu1Hash ' TH/s')"; gpu1HashRaw = $script:Gpu1Hash
+        gpu1TempText = Format-Metric $script:Gpu1Temp ' °C'; gpu1VramTempText = Format-Metric $g1.vramTempC ' °C'; gpu1PowerText = Format-Metric $script:Gpu1Power ' Вт'
+        gpu1FanText = Format-Metric $script:Gpu1Fan ' %'; gpu1ClocksText = "$(Format-Metric $script:Gpu1CClkNow)/$(Format-Metric $script:Gpu1MClkNow) MHz"
+        gpu1SharesText = "$(Format-Metric $g1.acceptedShares) / $(Format-Metric $g1.rejectedShares)"
+        energyText = "$(Format-Metric $script:TotalGpuKWh ' кВт·ч')"
+        energyCostText = if ($null -eq $energyCost) { "введите тариф" } else { "$(Format-Metric $energyCost ' ₽')" }
+        processText = $procStr
+    }
+    $lblTelemetryBox.Invalidate()
+    $poolFreshText = if ($script:PoolBalanceFetchedAt -and ((Get-Date) - $script:PoolBalanceFetchedAt).TotalSeconds -le 120) { $script:PoolBalanceFetchedAt.ToString('HH:mm:ss') } elseif ($script:PoolBalanceFetchedAt) { "устарели · $($script:PoolBalanceFetchedAt.ToString('HH:mm:ss'))" } else { "нет данных" }
+    $rubBalance = if ($null -ne $script:PrlRub -and $null -ne $script:PoolBalance) { "$(Format-Metric ($script:PoolBalance * $script:PrlRub) ' ₽')" } else { "нет свежего курса" }
+    $rubConfirmed = if ($null -ne $script:PrlRub -and $null -ne $script:PoolConfirmed) { "$(Format-Metric ($script:PoolConfirmed * $script:PrlRub) ' ₽')" } else { "нет свежего курса" }
+    $lblEarningsPanel.Text = "ФАКТИЧЕСКИЕ ДАННЫЕ KRYPTEX · РУБЛИ ПО РЫНОЧНОМУ КУРСУ`r`nПодтверждено: $(Format-Metric $script:PoolConfirmed ' PRL')  ($rubConfirmed)`r`nОжидает подтверждения: $(Format-Metric $script:PoolPending ' PRL')`r`nВсего: $(Format-Metric $script:PoolBalance ' PRL')  ($rubBalance) · выплачено: $(Format-Metric $script:PoolPaid ' PRL')`r`nПорог выплаты: $(Format-Metric $script:PayoutThreshold ' PRL') · PRL/RUB: $(Format-Metric $script:PrlRub ' ₽') · $poolFreshText"
+    $powerCurrent = if ($null -eq $totalPower) { "нет данных" } else { "$(Format-Metric $totalPower ' Вт')  ($totalPowerKwText)" }
+    $powerCost = if ($null -eq $energyCost) { "укажите тариф" } else { "$(Format-Metric $energyCost ' ₽')" }
+    $lblPowerPanel.Text = "ФАКТИЧЕСКОЕ ПОТРЕБЛЕНИЕ GPU · nvidia-smi`r`nСейчас всего: $powerCurrent · GPU0: $(Format-Metric $script:Gpu0Power ' Вт') · GPU1: $(Format-Metric $script:Gpu1Power ' Вт')`r`nНакоплено с этой панелью: $(Format-Metric $script:TotalGpuKWh ' кВт·ч')`r`nСтоимость по введённому тарифу: $powerCost · тариф: $(Format-Metric $script:ElectricityTariff ' ₽/кВт·ч')`r`nПотребление системы/розетки не измеряется этими датчиками."
 }
 
-function Poll-RealTelemetry {
+function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
     $api = $null
     $nvLines = @()
     try { $api = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/" -TimeoutSec 2 -ErrorAction Stop } catch {}
     try {
-        $nvLines = @(& nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory,temperature.memory --format=csv,noheader,nounits 2>$null)
+        $nvLines = @(& nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory --format=csv,noheader,nounits 2>$null)
         if ($LASTEXITCODE -ne 0) { $nvLines = @() }
     } catch { $nvLines = @() }
     $script:TelemetrySnapshot = Convert-PearlTelemetry $api $nvLines
@@ -687,6 +962,27 @@ function Poll-RealTelemetry {
             Set-Variable -Scope Script -Name ("Gpu"+$id+$mapping[0]) -Value $gpu[$mapping[1]]
         }
     }
+    $now = Get-Date
+    if (-not $SkipExternal) {
+        if ($Force -or -not $script:PoolBalanceFetchedAt -or (($now - $script:PoolBalanceFetchedAt).TotalSeconds -ge 60)) { Update-PoolBalance }
+        if ($Force -or -not $script:MarketRatesFetchedAt -or (($now - $script:MarketRatesFetchedAt).TotalMinutes -ge 15)) { Update-OfficialRates }
+    }
+    $currentWatts = if ($null -ne $script:Gpu0Power -and $null -ne $script:Gpu1Power) { [double]$script:Gpu0Power + [double]$script:Gpu1Power } else { $null }
+    if ($null -ne $currentWatts) {
+        if ($script:LastPowerSampleAt) {
+            $elapsed = ($now - $script:LastPowerSampleAt).TotalSeconds
+            if ($elapsed -gt 0 -and $elapsed -le 30 -and $null -ne $script:LastPowerSampleWatts) {
+                $averageWatts = ($currentWatts + $script:LastPowerSampleWatts) / 2.0
+                $script:TotalGpuKWh += ($averageWatts * $elapsed) / 3600000.0
+                if (-not $script:LastEnergySaveAt -or (($now - $script:LastEnergySaveAt).TotalSeconds -ge 60)) {
+                    Save-LocalRigSettings
+                    $script:LastEnergySaveAt = $now
+                }
+            }
+        }
+        $script:LastPowerSampleAt = $now
+        $script:LastPowerSampleWatts = $currentWatts
+    } else { $script:LastPowerSampleAt = $null; $script:LastPowerSampleWatts = $null }
     $proc = Get-Process -Name 'onezerominer' -ErrorAction SilentlyContinue | Select-Object -First 1
     $script:IsMiningRunning = $null -ne $proc
     $script:MinerPid = if ($proc) { $proc.Id } else { $null }
@@ -721,11 +1017,19 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
         Start-Sleep -Milliseconds 600
     }
 
-    if (-not (Test-Path "$MinerDir\onezerominer.exe")) {
-        $lblStatus.Text = "Статус: ОШИБКА — файл onezerominer.exe не найден по пути $MinerDir"
-        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-        Write-AgentLog "ERROR" "Не найден исполняемый файл: $MinerDir\onezerominer.exe"
-        return
+    if (-not (Test-Path -LiteralPath (Join-Path $MinerDir 'onezerominer.exe'))) {
+        $picker = New-Object System.Windows.Forms.OpenFileDialog
+        $picker.Title = "Выберите onezerominer.exe"
+        $picker.Filter = "OneZeroMiner (onezerominer.exe)|onezerominer.exe|Исполняемые файлы (*.exe)|*.exe"
+        $picker.CheckFileExists = $true
+        if ($picker.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK -or [IO.Path]::GetFileName($picker.FileName) -ine 'onezerominer.exe') {
+            $lblStatus.Text = "Статус: запуск отменён — выберите файл onezerominer.exe"
+            Write-AgentLog "WARN" "Запуск отменён: корректный onezerominer.exe не выбран."
+            return
+        }
+        $MinerDir = Split-Path -LiteralPath $picker.FileName -Parent
+        Save-LocalRigSettings
+        Write-AgentLog "INFO" "Путь майнера сохранён локально: $MinerDir"
     }
 
     $logDir = Split-Path $LogFile -Parent
@@ -905,6 +1209,7 @@ $btnSaveWallet.Add_Click({
     [System.IO.File]::WriteAllText($LocalWalletFile, $payload, [System.Text.Encoding]::UTF8)
     Write-AgentLog "OK" "Публичный адрес кошелька проверен и сохранён локально ($($script:Wallet.Length) симв.). Теперь можно нажать «▶ ЗАПУСТИТЬ»."
     Sync-WalletUiState
+    Poll-RealTelemetry -Force
 })
 
 $btnEditWallet.Add_Click({
@@ -919,18 +1224,28 @@ $btnEditWallet.Add_Click({
 
 $btnStart.Add_Click({ Start-MinerProcess -IsWatchdogRestart $false })
 $btnStop.Add_Click({ Stop-MinerProcess "Явная остановка пользователем (кнопка Стоп)" })
-$btnRefreshNow.Add_Click({ Poll-RealTelemetry })
+$btnRefreshNow.Add_Click({ Poll-RealTelemetry -Force })
 
-# Кнопка обновлений: без новой версии — повторная проверка; с новой версией — загрузка с огненной шкалой
-$btnCheckUpdate.Add_Click({
-    if ($script:DownloadActive) { return }
-    if ($script:UpdateAvailable -and $script:LatestVersion) {
-        Start-AgentUpdateDownload
-    } else {
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
-        $lblUpdateInfo.Text = "Проверка обновлений на GitHub Releases..."
-        Test-UpdateAvailable
+$btnSaveTariff.Add_Click({
+    $rawTariff = $txtTariff.Text.Trim().Replace(',', '.')
+    $parsedTariff = 0.0
+    if (-not [double]::TryParse($rawTariff, [Globalization.NumberStyles]::AllowDecimalPoint, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsedTariff) -or $parsedTariff -lt 0) {
+        [System.Windows.Forms.MessageBox]::Show("Введите неотрицательный тариф в ₽/кВт·ч.", "Проверка тарифа", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
     }
+    $script:ElectricityTariff = $parsedTariff
+    Save-LocalRigSettings
+    Write-AgentLog "INFO" "Тариф электроэнергии сохранён локально: $parsedTariff ₽/кВт·ч."
+    Update-TelemetryDisplay
+})
+
+$form.Add_FormClosing({ try { Save-LocalRigSettings } catch {} })
+
+# Открыть страницу выпуска нативной Windows-программы. Приватные файлы GitHub требуют входа.
+$btnCheckUpdate.Add_Click({
+    $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(56, 189, 248)
+    $lblUpdateInfo.Text = "Открываю релиз v$AppVersion на GitHub. Если появится 404, войдите в GitHub."
+    Start-Process "https://github.com/$UpdateRepo/releases/latest"
 })
 
 $existingOnOpen = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -955,8 +1270,8 @@ if ($ReadOnly) {
     $txtWallet.ReadOnly = $true
     $lblWalletHint.Text = "Режим мониторинга: настройки и работа майнера не изменяются."
 }
-Poll-RealTelemetry
-Test-UpdateAvailable
+Poll-RealTelemetry -SkipExternal
+$lblUpdateInfo.Text = "Версия v$AppVersion. Нажмите «ПРОВЕРИТЬ ОБНОВЛЕНИЯ» для страницы релизов."
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000

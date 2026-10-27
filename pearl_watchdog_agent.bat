@@ -2,12 +2,6 @@
 chcp 65001 >nul
 title Pearl Rig Control [dual4070ti]
 
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-    exit /b
-)
-
 set "SELF_BAT=%~f0"
 set "PS_AGENT=%TEMP%\pearl_rig_gui_supervisor.ps1"
 
@@ -40,7 +34,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.1"
+$AppVersion = "3.3.2"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false

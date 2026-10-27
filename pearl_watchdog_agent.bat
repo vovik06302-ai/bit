@@ -40,7 +40,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.0"
+$AppVersion = "3.3.1"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false
@@ -106,6 +106,7 @@ $ThermalThrottled = $false
 
 # Реальные показатели телеметрии ($null = нет данных, никаких случайных чисел)
 $ApiAvailable = $false
+$script:ApiRetryAfter = [DateTime]::MinValue
 $NvmlAvailable = $false
 $PoolConnected = $null
 $ActivePoolUrl = $null
@@ -941,7 +942,18 @@ function Update-TelemetryDisplay {
 function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
     $api = $null
     $nvLines = @()
-    try { $api = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/" -TimeoutSec 2 -ErrorAction Stop } catch {}
+    $proc = Get-Process -Name 'onezerominer' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $now = Get-Date
+    # Do not block the WinForms UI every timer tick waiting for an API that cannot
+    # exist while the miner is stopped. Back off briefly after an API timeout too.
+    if ($proc -and ($script:ApiAvailable -or $now -ge $script:ApiRetryAfter)) {
+        try {
+            $api = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/" -TimeoutSec 1 -ErrorAction Stop
+            $script:ApiRetryAfter = [DateTime]::MinValue
+        } catch {
+            $script:ApiRetryAfter = $now.AddSeconds(15)
+        }
+    }
     try {
         $nvLines = @(& nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,fan.speed,clocks.current.graphics,clocks.current.memory --format=csv,noheader,nounits 2>$null)
         if ($LASTEXITCODE -ne 0) { $nvLines = @() }
@@ -962,7 +974,6 @@ function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
             Set-Variable -Scope Script -Name ("Gpu"+$id+$mapping[0]) -Value $gpu[$mapping[1]]
         }
     }
-    $now = Get-Date
     if (-not $SkipExternal) {
         if ($Force -or -not $script:PoolBalanceFetchedAt -or (($now - $script:PoolBalanceFetchedAt).TotalSeconds -ge 60)) { Update-PoolBalance }
         if ($Force -or -not $script:MarketRatesFetchedAt -or (($now - $script:MarketRatesFetchedAt).TotalMinutes -ge 15)) { Update-OfficialRates }
@@ -983,7 +994,6 @@ function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
         $script:LastPowerSampleAt = $now
         $script:LastPowerSampleWatts = $currentWatts
     } else { $script:LastPowerSampleAt = $null; $script:LastPowerSampleWatts = $null }
-    $proc = Get-Process -Name 'onezerominer' -ErrorAction SilentlyContinue | Select-Object -First 1
     $script:IsMiningRunning = $null -ne $proc
     $script:MinerPid = if ($proc) { $proc.Id } else { $null }
     Update-TelemetryDisplay

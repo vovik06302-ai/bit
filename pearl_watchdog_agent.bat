@@ -36,7 +36,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.4"
+$AppVersion = "3.3.5"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false
@@ -48,6 +48,11 @@ $script:DownloadProgress = 0
 $CurrentCClk = "2400,2400"
 $CurrentMClk = "810,810"
 $CurrentPL = "150,150"
+$script:GpuPowerMin = 100
+$script:GpuPowerMax = 285
+$script:GpuPowerLimit = 150
+$script:GpuPowerRangeVerified = $false
+$script:NvidiaSmiPath = $null
 $CurrentKernel = "2,2"
 $CurrentFan = "65,*"
 
@@ -76,9 +81,38 @@ if (Test-Path -LiteralPath $LocalSettingsFile) {
         $localSettings = Get-Content -LiteralPath $LocalSettingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($localSettings.electricityTariff -is [ValueType] -and [double]$localSettings.electricityTariff -ge 0) { $script:ElectricityTariff = [double]$localSettings.electricityTariff }
         if ($localSettings.totalGpuKWh -is [ValueType] -and [double]$localSettings.totalGpuKWh -ge 0) { $script:TotalGpuKWh = [double]$localSettings.totalGpuKWh }
+        if ($localSettings.gpuPowerLimit -is [ValueType]) { $script:GpuPowerLimit = [int]$localSettings.gpuPowerLimit }
         if ($localSettings.minerDir -and (Test-Path -LiteralPath (Join-Path ([string]$localSettings.minerDir) 'onezerominer.exe'))) { $MinerDir = [string]$localSettings.minerDir }
     } catch {}
 }
+$nvidiaCommand = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $nvidiaCommand) {
+    $nvidiaCandidate = Join-Path $env:SystemRoot 'System32\nvidia-smi.exe'
+    if (Test-Path -LiteralPath $nvidiaCandidate) { $script:NvidiaSmiPath = $nvidiaCandidate }
+} else { $script:NvidiaSmiPath = $nvidiaCommand.Source }
+if ($script:NvidiaSmiPath) {
+    try {
+        $powerBounds = @(& $script:NvidiaSmiPath --query-gpu=power.min_limit,power.max_limit --format=csv,noheader,nounits 2>$null)
+        $mins = @(); $maxs = @()
+        foreach ($boundLine in $powerBounds) {
+            $parts = ([string]$boundLine).Split(',')
+            if ($parts.Count -ge 2) {
+                $minParsed = 0.0; $maxParsed = 0.0
+                if ([double]::TryParse($parts[0].Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$minParsed) -and
+                    [double]::TryParse($parts[1].Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$maxParsed)) {
+                    $mins += [int][Math]::Ceiling($minParsed); $maxs += [int][Math]::Floor($maxParsed)
+                }
+            }
+        }
+        if ($mins.Count -ge 2 -and $maxs.Count -ge 2) {
+            $script:GpuPowerMin = ($mins | Measure-Object -Maximum).Maximum
+            $script:GpuPowerMax = ($maxs | Measure-Object -Minimum).Minimum
+            $script:GpuPowerRangeVerified = ($script:GpuPowerMax -ge $script:GpuPowerMin)
+        }
+    } catch {}
+}
+$script:GpuPowerLimit = [Math]::Max($script:GpuPowerMin, [Math]::Min($script:GpuPowerMax, $script:GpuPowerLimit))
+$CurrentPL = "$($script:GpuPowerLimit),$($script:GpuPowerLimit)"
 
 # Публичный адрес кошелька Pearl по умолчанию (только адрес выплат, без секретных ключей)
 $DefaultWallet = "prl1psn90qwn5r86z4rhfaz2tmetf5uhtvcxl82e6xrmv62rka2jvk9dsvs0ayz"
@@ -446,13 +480,55 @@ $btnSaveTariff.Location = New-Object System.Drawing.Point(214, 211)
 $btnSaveTariff.Size = New-Object System.Drawing.Size(120, 28)
 $form.Controls.Add($btnSaveTariff)
 
+$lblGpuPower = New-Object System.Windows.Forms.Label
+$lblGpuPower.Text = "Лимит мощности GPU (Вт на карту)"
+$lblGpuPower.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$lblGpuPower.ForeColor = [System.Drawing.Color]::FromArgb(203, 213, 225)
+$lblGpuPower.Location = New-Object System.Drawing.Point(20, 246)
+$lblGpuPower.Size = New-Object System.Drawing.Size(230, 26)
+$form.Controls.Add($lblGpuPower)
+
+$trackGpuPower = New-Object System.Windows.Forms.TrackBar
+$trackGpuPower.Minimum = $script:GpuPowerMin
+$trackGpuPower.Maximum = [Math]::Max($script:GpuPowerMin + 1, $script:GpuPowerMax)
+$trackGpuPower.Value = [Math]::Max($trackGpuPower.Minimum, [Math]::Min($trackGpuPower.Maximum, $script:GpuPowerLimit))
+$trackGpuPower.TickFrequency = 10
+$trackGpuPower.SmallChange = 1
+$trackGpuPower.LargeChange = 10
+$trackGpuPower.AutoSize = $false
+$trackGpuPower.Location = New-Object System.Drawing.Point(250, 240)
+$trackGpuPower.Size = New-Object System.Drawing.Size(550, 38)
+$trackGpuPower.Enabled = $script:GpuPowerRangeVerified -and (-not $ReadOnly)
+$form.Controls.Add($trackGpuPower)
+
+$lblGpuPowerValue = New-Object System.Windows.Forms.Label
+$lblGpuPowerValue.Text = if ($script:GpuPowerRangeVerified) { "$($script:GpuPowerLimit) Вт на карту" } else { "нет диапазона" }
+$lblGpuPowerValue.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
+$lblGpuPowerValue.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+$lblGpuPowerValue.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+$lblGpuPowerValue.Location = New-Object System.Drawing.Point(805, 246)
+$lblGpuPowerValue.Size = New-Object System.Drawing.Size(135, 26)
+$form.Controls.Add($lblGpuPowerValue)
+
+$btnApplyGpuPower = New-Object System.Windows.Forms.Button
+$btnApplyGpuPower.Text = "ПРИМЕНИТЬ"
+$btnApplyGpuPower.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$btnApplyGpuPower.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
+$btnApplyGpuPower.ForeColor = [System.Drawing.Color]::White
+$btnApplyGpuPower.FlatStyle = "Flat"
+$btnApplyGpuPower.Location = New-Object System.Drawing.Point(950, 244)
+$btnApplyGpuPower.Size = New-Object System.Drawing.Size(135, 30)
+$btnApplyGpuPower.Enabled = $script:GpuPowerRangeVerified -and (-not $ReadOnly)
+$form.Controls.Add($btnApplyGpuPower)
+$trackGpuPower.Add_ValueChanged({ $lblGpuPowerValue.Text = "$($trackGpuPower.Value) Вт на карту" })
+
 $pbarDownload = New-Object System.Windows.Forms.ProgressBar
 $pbarDownload.Style = "Continuous"
 $pbarDownload.Minimum = 0
 $pbarDownload.Maximum = 100
 $pbarDownload.Value = 0
 $pbarDownload.Visible = $false
-$pbarDownload.Location = New-Object System.Drawing.Point(20, 242)
+$pbarDownload.Location = New-Object System.Drawing.Point(20, 280)
 $pbarDownload.Size = New-Object System.Drawing.Size(1065, 18)
 $form.Controls.Add($pbarDownload)
 
@@ -700,7 +776,16 @@ function Update-WindowLayout {
     $lblUpdateInfo.Left = 520
     $lblUpdateInfo.Width = [Math]::Max(300, $w - $lblUpdateInfo.Left - 20)
     $pbarDownload.Width = $w - 40
+    $btnApplyGpuPower.Left = $right - $btnApplyGpuPower.Width
+    $lblGpuPowerValue.Left = $btnApplyGpuPower.Left - $lblGpuPowerValue.Width - 8
+    $trackGpuPower.Left = $lblGpuPower.Left + $lblGpuPower.Width
+    $trackGpuPower.Width = [Math]::Max(180, $lblGpuPowerValue.Left - $trackGpuPower.Left - 8)
+    $lblGpuPowerValue.Location = New-Object System.Drawing.Point($lblGpuPowerValue.Left, 246)
+    $btnApplyGpuPower.Top = 244
+    $trackGpuPower.Top = 240
+    $lblGpuPower.Top = 246
     $telemetryHeight = 250
+    $lblTelemetryBox.Top = 310
     $lblTelemetryBox.Width = $w - 40
     $lblTelemetryBox.Height = $telemetryHeight
     $gap = 10
@@ -894,8 +979,27 @@ function Update-OfficialRates {
 }
 
 function Save-LocalRigSettings {
-    $payload = @{ electricityTariff = $script:ElectricityTariff; totalGpuKWh = $script:TotalGpuKWh; minerDir = $MinerDir; updatedAt = (Get-Date).ToString("o") } | ConvertTo-Json
+    $payload = @{ electricityTariff = $script:ElectricityTariff; totalGpuKWh = $script:TotalGpuKWh; gpuPowerLimit = $script:GpuPowerLimit; minerDir = $MinerDir; updatedAt = (Get-Date).ToString("o") } | ConvertTo-Json
     [System.IO.File]::WriteAllText($LocalSettingsFile, $payload, [System.Text.Encoding]::UTF8)
+}
+
+function Apply-GpuPowerLimit([int]$Watts) {
+    if (-not $script:GpuPowerRangeVerified -or -not $script:NvidiaSmiPath) { throw "Не удалось прочитать реальные границы мощности видеокарт через nvidia-smi." }
+    if ($Watts -lt $script:GpuPowerMin -or $Watts -gt $script:GpuPowerMax) { throw "Значение $Watts Вт вне общего диапазона карт ($($script:GpuPowerMin)-$($script:GpuPowerMax) Вт)." }
+    $escapedCli = $script:NvidiaSmiPath.Replace("'", "''")
+    $command = "`$ErrorActionPreference='Stop'; & '$escapedCli' -i 0 -pl $Watts; if (`$LASTEXITCODE -ne 0) { exit 11 }; & '$escapedCli' -i 1 -pl $Watts; if (`$LASTEXITCODE -ne 0) { exit 12 }; exit 0"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $powershellExe = Join-Path $PSHOME 'powershell.exe'
+    $elevated = Start-Process -FilePath $powershellExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -Verb RunAs -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop
+    if ($elevated.ExitCode -eq 11) { throw "nvidia-smi не смог применить лимит для GPU #0. Проверьте драйвер и минимально допустимое значение." }
+    if ($elevated.ExitCode -eq 12) { throw "Лимит применился к GPU #0, но не к GPU #1. Проверьте драйвер и значение." }
+    if ($elevated.ExitCode -ne 0) { throw "Windows завершила применение лимита с кодом $($elevated.ExitCode)." }
+    $script:GpuPowerLimit = $Watts
+    $script:CurrentPL = "$Watts,$Watts"
+    Save-LocalRigSettings
+    Write-AgentLog "OK" "Ограничение мощности применено: $Watts Вт на каждую видеокарту. Сохранено для следующих запусков майнера."
+    $lblStatus.Text = "Статус: лимит GPU установлен — $Watts Вт на карту (диапазон $($script:GpuPowerMin)-$($script:GpuPowerMax) Вт)."
+    $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
 }
 
 function Update-TelemetryDisplay {
@@ -1263,6 +1367,17 @@ $btnEditWallet.Add_Click({
 $btnStart.Add_Click({ Start-MinerProcess -IsWatchdogRestart $false })
 $btnStop.Add_Click({ Stop-MinerProcess "Явная остановка пользователем (кнопка Стоп)" })
 $btnRefreshNow.Add_Click({ Poll-RealTelemetry -Force })
+$btnApplyGpuPower.Add_Click({
+    $btnApplyGpuPower.Enabled = $false
+    try {
+        Apply-GpuPowerLimit -Watts $trackGpuPower.Value
+    } catch {
+        $lblStatus.Text = "Статус: не удалось применить лимит GPU. Разрешите запрос Windows и проверьте драйвер."
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        Write-AgentLog "ERROR" "Лимит мощности GPU не применён: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Не удалось применить лимит мощности", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    } finally { $btnApplyGpuPower.Enabled = $script:GpuPowerRangeVerified -and (-not $ReadOnly) }
+})
 
 $btnSaveTariff.Add_Click({
     $rawTariff = $txtTariff.Text.Trim().Replace(',', '.')
@@ -1305,6 +1420,8 @@ if ($ReadOnly) {
     $btnStop.Enabled = $false
     $btnSaveWallet.Enabled = $false
     $btnEditWallet.Enabled = $false
+    $trackGpuPower.Enabled = $false
+    $btnApplyGpuPower.Enabled = $false
     $txtWallet.ReadOnly = $true
     $lblWalletHint.Text = "Режим мониторинга: настройки и работа майнера не изменяются."
 }

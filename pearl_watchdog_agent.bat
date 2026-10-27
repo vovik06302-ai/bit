@@ -36,7 +36,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.3"
+$AppVersion = "3.3.4"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false
@@ -995,6 +995,15 @@ function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
     Update-TelemetryDisplay
 }
 
+function Stop-ElevatedMinerProcess([int]$ProcessId) {
+    if ($ProcessId -le 0) { return }
+    $command = "Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $powershellExe = Join-Path $PSHOME 'powershell.exe'
+    $stopper = Start-Process -FilePath $powershellExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -Verb RunAs -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop
+    if ($stopper.ExitCode -ne 0) { throw "Windows could not stop OneZeroMiner (PID $ProcessId)." }
+}
+
 function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
     if ($ReadOnly) { return }
     $chk = Test-PearlWalletFormat $script:Wallet
@@ -1019,7 +1028,12 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
     }
 
     if ($existing -and $IsWatchdogRestart) {
-        Stop-Process -Id $existing.Id -Force -ErrorAction SilentlyContinue
+        try { Stop-ElevatedMinerProcess -ProcessId $existing.Id }
+        catch {
+            $lblStatus.Text = "Статус: перезапуск отложен — Windows не подтвердила остановку майнера."
+            Write-AgentLog "ERROR" "Watchdog не смог остановить процесс $($existing.Id): $($_.Exception.Message)"
+            return
+        }
         Start-Sleep -Milliseconds 600
     }
 
@@ -1041,13 +1055,24 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
     $logDir = Split-Path $LogFile -Parent
     if ($logDir -and (-not (Test-Path $logDir))) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
+    Set-Location $MinerDir
+    $minerArgs = "-a pearl -w $($script:Wallet) -o $Pool1 --worker $Worker --cclk $CurrentCClk --mclk $CurrentMClk --pl $CurrentPL --kernel $CurrentKernel --fan $CurrentFan --api-port $ApiPort --log-file `"$LogFile`""
+    $lblStatus.Text = "Статус: ожидается разрешение Windows для настройки частот и охлаждения GPU..."
+    Write-AgentLog "INFO" "Запрашивается разрешение Windows для запуска OneZeroMiner с настройками GPU."
+    try {
+        $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WorkingDirectory $MinerDir -WindowStyle Normal -Verb RunAs -PassThru -ErrorAction Stop
+    } catch {
+        $script:MiningDesired = $false
+        $script:IsMiningRunning = $false
+        $script:MinerPid = $null
+        $lblStatus.Text = "Статус: запуск отменён — Windows не разрешила применить настройки GPU."
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+        Write-AgentLog "WARN" "Запуск OneZeroMiner отменён или отклонён Windows: $($_.Exception.Message)"
+        return
+    }
     $script:MiningDesired = $true
     $script:UserStoppedManually = $false
     $script:ThermalThrottled = $false
-
-    Set-Location $MinerDir
-    $minerArgs = "-a pearl -w $($script:Wallet) -o $Pool1 --worker $Worker --cclk $CurrentCClk --mclk $CurrentMClk --pl $CurrentPL --kernel $CurrentKernel --fan $CurrentFan --api-port $ApiPort --log-file `"$LogFile`""
-    $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WindowStyle Normal -PassThru -ErrorAction Stop
     $script:IsMiningRunning = $true
     $script:MinerPid = if ($started) { $started.Id } else { $null }
 
@@ -1059,12 +1084,19 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
 
 function Stop-MinerProcess([string]$Reason = "Нажата кнопка «Стоп» пользователем") {
     if ($ReadOnly) { return }
+    $processes = @(Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue)
+    try {
+        foreach ($process in $processes) { Stop-ElevatedMinerProcess -ProcessId $process.Id }
+    } catch {
+        $lblStatus.Text = "Статус: майнер продолжает работать — Windows не подтвердила остановку."
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        Write-AgentLog "ERROR" "Остановка OneZeroMiner отменена или отклонена Windows: $($_.Exception.Message)"
+        return
+    }
     $script:UserStoppedManually = $true
     $script:MiningDesired = $false
     $script:ReconnectStage = "idle"
     $script:DisconnectElapsedSec = 0
-
-    Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $script:IsMiningRunning = $false
     $script:MinerPid = $null
 

@@ -2,8 +2,6 @@ import telemetryScript from '../agent/telemetry.ps1?raw';
 import { RigConfig, WatchdogPolicy, LogDiagnosticItem } from '../types/rig';
 
 const BECH32_CHARSET_REGEX = /^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$/;
-const KNOWN_TRUNCATED_SAMPLE = '[REMOVED_LOCAL_WALLET]';
-export const DEFAULT_PEARL_WALLET = '[REMOVED_LOCAL_WALLET]';
 
 export function validatePearlWallet(address: string): {
   valid: boolean;
@@ -39,17 +37,6 @@ export function validatePearlWallet(address: string): {
       expectedLength: 63,
       message:
         'ОШИБКА БЕЗОПАСНОСТИ: Введена мнемоническая фраза или приватный ключ! Программа никогда не запрашивает секретные ключи. Введите только публичный адрес выплат Pearl (prl1p... / prl1q...).',
-    };
-  }
-
-  if (clean.toLowerCase() === KNOWN_TRUNCATED_SAMPLE) {
-    return {
-      valid: false,
-      type: 'truncated_prl',
-      length: clean.length,
-      expectedLength: 63,
-      message:
-        'Заблокирован обрезанный демонстрационный адрес (29 из 63 символов). Введите ваш полный публичный адрес Pearl (63 символа).',
     };
   }
 
@@ -377,9 +364,6 @@ function Test-PearlWalletFormat([string]$Addr) {
         return @{ Valid = $false; Reason = "ОШИБКА: Не вводите seed-фразу или приватный ключ! Нужен только публичный адрес prl1p..." }
     }
     $lower = $clean.ToLowerInvariant()
-    if ($lower -eq "[REMOVED_LOCAL_WALLET]") {
-        return @{ Valid = $false; Reason = "Обрезанный тестовый адрес (29 симв.) заблокирован. Введите полный 63-символьный адрес." }
-    }
     if ($lower.StartsWith("prl1p")) {
         $body = $lower.Substring(5)
         if ($lower.Length -eq 63 -and ($body -match "^[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$")) {

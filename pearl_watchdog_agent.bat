@@ -19,7 +19,9 @@ $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$MinerDir = "$env:LOCALAPPDATA\PearlRigControl\miner"
+$InstalledAppDir = if ($env:SELF_BAT) { Split-Path -Parent $env:SELF_BAT } else { $PSScriptRoot }
+$MinerDir = Join-Path $InstalledAppDir 'miner'
+if (-not (Test-Path -LiteralPath (Join-Path $MinerDir 'onezerominer.exe'))) { $MinerDir = "$env:LOCALAPPDATA\PearlRigControl\miner" }
 $LogFile = "$env:LOCALAPPDATA\PearlRigControl\pearl-miner.log"
 $Worker = "dual4070ti"
 $Pool1 = "stratum+tcp://prl-ru.kryptex.network:7048"
@@ -34,7 +36,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.2"
+$AppVersion = "3.3.3"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:UpdateAvailable = $false

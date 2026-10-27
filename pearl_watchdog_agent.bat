@@ -36,10 +36,12 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.5"
+$AppVersion = "3.3.6"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
+$script:LatestReleaseUrl = $null
 $script:UpdateAvailable = $false
+$script:UpdateCheckActive = $false
 $script:DownloadActive = $false
 $script:DownloadProgress = 0
 
@@ -418,15 +420,15 @@ $form.Controls.Add($btnRefreshNow)
 
 # БЛОК 2b: Обновление агента (версия, проверка, огненная шкала загрузки)
 $lblVersion = New-Object System.Windows.Forms.Label
-$lblVersion.Text = "Версия агента: v$AppVersion"
+$lblVersion.Text = "Установлена: v$AppVersion"
 $lblVersion.Font = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
 $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
 $lblVersion.Location = New-Object System.Drawing.Point(345, 214)
-$lblVersion.Size = New-Object System.Drawing.Size(200, 22)
+$lblVersion.Size = New-Object System.Drawing.Size(165, 22)
 $form.Controls.Add($lblVersion)
 
 $btnCheckUpdate = New-Object System.Windows.Forms.Button
-$btnCheckUpdate.Text = "ПРОВЕРИТЬ ОБНОВЛЕНИЯ"
+$btnCheckUpdate.Text = "ПРОВЕРИТЬ v$AppVersion"
 $btnCheckUpdate.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
 $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
 $btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
@@ -613,7 +615,6 @@ function Get-GitHubLatestRelease {
         foreach ($a in $rel.assets) {
             if ($a.name -like "*PearlRigControl-Setup*") { $assetUrl = [string]$a.browser_download_url; break }
         }
-        if (-not $assetUrl -and $rel.assets.Count -gt 0) { $assetUrl = [string]$rel.assets[0].browser_download_url }
         return @{ Version = $ver; Url = $assetUrl }
     } catch {
         return $null
@@ -621,47 +622,84 @@ function Get-GitHubLatestRelease {
 }
 
 function Test-UpdateAvailable {
-    $latest = Get-GitHubLatestRelease
-    if (-not $latest -or -not $latest.Version) {
-        Write-AgentLog "WARN" "Не удалось получить информацию о последней версии агента (нет доступа к GitHub Releases)."
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-        $lblUpdateInfo.Text = "Обновления: нет связи с GitHub Releases — повторите позже."
-        return
-    }
-    $script:LatestVersion = $latest.Version
-    try {
-        $cur = [System.Version]$AppVersion
-        $new = [System.Version]$latest.Version
-        $script:UpdateAvailable = ($new -gt $cur)
-    } catch {
-        $script:UpdateAvailable = ($latest.Version -ne $AppVersion)
-    }
-    if ($script:UpdateAvailable) {
-        $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
-        $lblVersion.Text = "Версия агента: v$AppVersion → доступна v$($latest.Version)"
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
-        $lblUpdateInfo.Text = "ОБНАРУЖЕНА НОВАЯ ВЕРСИЯ: v$($latest.Version). Нажмите «Скачать v$($latest.Version)»."
-        $btnCheckUpdate.Text = "Скачать v$($latest.Version)"
-        $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(234, 88, 12)
-        $btnCheckUpdate.ForeColor = [System.Drawing.Color]::White
-        Write-AgentLog "OK" "Обнаружена новая версия агента: v$($latest.Version) (текущая v$AppVersion)."
-    } else {
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
-        $lblUpdateInfo.Text = "Обновления: ваша версия v$AppVersion актуальна (последняя release: v$($latest.Version))."
-        Write-AgentLog "INFO" "Проверка обновлений: установлена актуальная версия v$AppVersion."
-    }
+    if ($script:UpdateCheckActive -or $script:DownloadActive) { return }
+    $script:UpdateCheckActive = $true
+    $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(56, 189, 248)
+    $lblUpdateInfo.Text = "Проверяю последнюю версию на GitHub..."
+    $btnCheckUpdate.Text = "ПРОВЕРКА..."
+    $btnCheckUpdate.Enabled = $false
+    $worker = New-Object System.ComponentModel.BackgroundWorker
+    $worker.add_DoWork({
+        param($sender, $e)
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
+        $ver = ([string]$rel.tag_name) -replace "^[vV]", ""
+        if (-not $ver) { throw "GitHub returned a release without tag_name." }
+        $assetUrl = $null
+        foreach ($asset in $rel.assets) {
+            if ($asset.name -eq "PearlRigControl-Setup.exe") { $assetUrl = [string]$asset.browser_download_url; break }
+        }
+        $e.Result = @{ Version = $ver; Url = $assetUrl }
+    })
+    $worker.add_RunWorkerCompleted({
+        param($sender, $e)
+$script:UpdateCheckActive = $false
+        $btnCheckUpdate.Enabled = $true
+        $btnCheckUpdate.Text = "ПРОВЕРИТЬ v$AppVersion"
+        $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
+        $btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+        if ($e.Error) {
+            $script:UpdateAvailable = $false
+            $script:LatestReleaseUrl = $null
+            $lblVersion.Text = "Установлена: v$AppVersion"
+            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            $lblUpdateInfo.Text = "GitHub недоступен: $($e.Error.Exception.Message)"
+            Write-AgentLog "ERROR" "Проверка обновлений не удалась: $($e.Error.Exception.Message)"
+            $sender.Dispose()
+            return
+        }
+        $latest = $e.Result
+        $script:LatestVersion = $latest.Version
+        $script:LatestReleaseUrl = $latest.Url
+        try { $script:UpdateAvailable = ([System.Version]$latest.Version -gt [System.Version]$AppVersion) }
+        catch { $script:UpdateAvailable = ($latest.Version -ne $AppVersion) }
+        $lblVersion.Text = "Установлена: v$AppVersion"
+        if ($script:UpdateAvailable -and $latest.Url) {
+            $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
+            $lblUpdateInfo.Text = "ВЫШЛА НОВАЯ ВЕРСИЯ v$($latest.Version). Нажмите «СКАЧАТЬ»."
+            $btnCheckUpdate.Text = "СКАЧАТЬ v$($latest.Version)"
+            $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(234, 88, 12)
+            $btnCheckUpdate.ForeColor = [System.Drawing.Color]::White
+            Write-AgentLog "OK" "Обнаружена новая версия агента: v$($latest.Version) (установлена v$AppVersion)."
+        } elseif ($script:UpdateAvailable) {
+            $script:UpdateAvailable = $false
+            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            $lblUpdateInfo.Text = "v$($latest.Version) вышла, но установщик не найден в релизе."
+            Write-AgentLog "ERROR" "В релизе v$($latest.Version) отсутствует PearlRigControl-Setup.exe."
+        } else {
+            $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+            $lblUpdateInfo.Text = "Установлена последняя версия v$AppVersion."
+            Write-AgentLog "INFO" "Проверка обновлений: установлена актуальная версия v$AppVersion."
+        }
+        $sender.Dispose()
+    })
+    $script:UpdateCheckWorker = $worker
+    $worker.RunWorkerAsync()
 }
 
 function Start-AgentUpdateDownload {
     if ($script:DownloadActive) { return }
-    $latest = Get-GitHubLatestRelease
-    if (-not $latest -or -not $latest.Url) {
+    $latest = @{ Version = $script:LatestVersion; Url = $script:LatestReleaseUrl }
+    if (-not $latest.Version -or -not $latest.Url) {
         Write-AgentLog "ERROR" "Не найден файл установки для скачивания в последнем релизе."
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "В релизе нет файла PearlRigControl-Setup.exe."
         return
     }
     $script:DownloadActive = $true
     $script:DownloadProgress = 0
-    $pbarDownload.Value = 0
+    $pbarDownload.Value = 1
     $pbarDownload.Visible = $true
     Start-FireProgressBar
     $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
@@ -670,47 +708,85 @@ function Start-AgentUpdateDownload {
     Write-AgentLog "INFO" "Начата загрузка новой версии агента v$($latest.Version): $($latest.Url)"
 
     $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) "PearlRigControl-Setup-$($latest.Version).exe"
-    try {
-        $req = [System.Net.HttpWebRequest]::Create($latest.Url)
-        $req.UserAgent = "PearlRigControl"
-        $req.AllowAutoRedirect = $true
-        $resp = $req.GetResponse()
-        $total = [int]$resp.ContentLength
-        if ($total -lt 1) { $total = 25000000 }
-        $inStream = $resp.GetResponseStream()
-        $outStream = [System.IO.File]::Create($tmpFile)
-        $buffer = New-Object byte[] 65536
-        $done = 0
-        while ($true) {
-            $read = $inStream.Read($buffer, 0, $buffer.Length)
-            if ($read -le 0) { break }
-            $outStream.Write($buffer, 0, $read)
-            $done += $read
-            $pct = [Math]::Min(100, [int](($done * 100.0) / $total))
-            $pbarDownload.Value = $pct
-            $script:DownloadProgress = $pct
-            $lblUpdateInfo.Text = "Загрузка v$($latest.Version)... $pct% ($([Math]::Round($done/1MB, 1)) МБ из $([Math]::Round($total/1MB, 1)) МБ)"
+    $worker = New-Object System.ComponentModel.BackgroundWorker
+    $worker.WorkerReportsProgress = $true
+    $worker.add_DoWork({
+        param($sender, $e)
+        $job = $e.Argument
+        $response = $null; $inputStream = $null; $outputStream = $null
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($job.Url)
+            $req.UserAgent = "PearlRigControl"
+            $req.AllowAutoRedirect = $true
+            $req.Timeout = 30000
+            $req.ReadWriteTimeout = 30000
+            $response = $req.GetResponse()
+            $total = [long]$response.ContentLength
+            $inputStream = $response.GetResponseStream()
+            $outputStream = [System.IO.File]::Create($job.Path)
+            $buffer = New-Object byte[] 65536
+            [long]$done = 0
+            $lastPct = -1
+            while ($true) {
+                $read = $inputStream.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+                $outputStream.Write($buffer, 0, $read)
+                $done += $read
+                $pct = if ($total -gt 0) { [Math]::Min(99, [int](($done * 100.0) / $total)) } else { 0 }
+                if ($pct -ne $lastPct) {
+                    $sender.ReportProgress($pct, @{ Done = $done; Total = $total; Version = $job.Version })
+                    $lastPct = $pct
+                }
+            }
+            if ($total -gt 0 -and $done -ne $total) { throw "Загружено $done байт из $total; файл неполный." }
+            if ($done -lt 1000000) { throw "Сервер вернул слишком маленький файл ($done байт)." }
+            $e.Result = @{ Path = $job.Path; Version = $job.Version; Bytes = $done }
+        } catch {
+            if (Test-Path -LiteralPath $job.Path) { Remove-Item -LiteralPath $job.Path -Force -ErrorAction SilentlyContinue }
+            throw
+        } finally {
+            if ($outputStream) { $outputStream.Dispose() }
+            if ($inputStream) { $inputStream.Dispose() }
+            if ($response) { $response.Dispose() }
         }
-        $outStream.Close(); $inStream.Close(); $resp.Close()
+    })
+    $worker.add_ProgressChanged({
+        param($sender, $e)
+        $pbarDownload.Value = [Math]::Max(1, [Math]::Min(99, $e.ProgressPercentage))
+        $script:DownloadProgress = $e.ProgressPercentage
+        $data = $e.UserState
+        if ($data.Total -gt 0) {
+            $lblUpdateInfo.Text = "Загрузка v$($data.Version)... $($e.ProgressPercentage)% ($([Math]::Round($data.Done/1MB, 1)) из $([Math]::Round($data.Total/1MB, 1)) МБ)"
+        } else {
+            $lblUpdateInfo.Text = "Загрузка v$($data.Version)... $([Math]::Round($data.Done/1MB, 1)) МБ"
+        }
+    })
+    $worker.add_RunWorkerCompleted({
+        param($sender, $e)
         Stop-FireProgressBar
         $pbarDownload.Visible = $false
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
-        $lblUpdateInfo.Text = "Загрузка v$($latest.Version) завершена (100%). Установщик сохранён: $tmpFile"
-        Write-AgentLog "OK" "Новая версия v$($latest.Version) загружена в $tmpFile. Для обновления запустите установщик."
-        $confirm = [System.Windows.Forms.MessageBox]::Show("Установка v$($latest.Version) успешно загружена.`n`nЗапустить установщик прямо сейчас?", "Обновление готово", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-        if ($confirm -eq [System.Windows.Forms.DialogResult]::Yes) {
-            Start-Process -FilePath $tmpFile
-        }
-    } catch {
-        Stop-FireProgressBar
-        $pbarDownload.Visible = $false
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-        $lblUpdateInfo.Text = "Ошибка загрузки обновления: $($_.Exception.Message)"
-        Write-AgentLog "ERROR" "Сбой при загрузке обновления: $($_.Exception.Message)"
-    } finally {
         $script:DownloadActive = $false
         $btnCheckUpdate.Enabled = $true
-    }
+        if ($e.Error) {
+            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+            $lblUpdateInfo.Text = "Ошибка загрузки v$($script:LatestVersion): $($e.Error.Exception.Message)"
+            Write-AgentLog "ERROR" "Сбой при загрузке обновления: $($e.Error.Exception.Message)"
+            $script:UpdateDownloadWorker.Dispose()
+            $script:UpdateDownloadWorker = $null
+            return
+        }
+        $result = $e.Result
+        $pbarDownload.Value = 100
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+        $lblUpdateInfo.Text = "v$($result.Version) загружена. Установщик готов."
+        Write-AgentLog "OK" "Новая версия v$($result.Version) загружена в $($result.Path), $($result.Bytes) байт."
+        $confirm = [System.Windows.Forms.MessageBox]::Show("Установщик v$($result.Version) загружен.`n`nЗапустить установку сейчас?", "Обновление готово", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($confirm -eq [System.Windows.Forms.DialogResult]::Yes) { Start-Process -FilePath $result.Path }
+        $script:UpdateDownloadWorker.Dispose()
+        $script:UpdateDownloadWorker = $null
+    })
+    $script:UpdateDownloadWorker = $worker
+    $worker.RunWorkerAsync(@{ Url = $latest.Url; Path = $tmpFile; Version = $latest.Version })
 }
 
 # БЛОК 3: Карточки реальной телеметрии (без выдуманных чисел)
@@ -1394,11 +1470,15 @@ $btnSaveTariff.Add_Click({
 
 $form.Add_FormClosing({ try { Save-LocalRigSettings } catch {} })
 
-# Открыть страницу выпуска нативной Windows-программы. Приватные файлы GitHub требуют входа.
+# Проверка и скачивание обновлений нативной Windows-программы из GitHub Releases.
 $btnCheckUpdate.Add_Click({
-    $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(56, 189, 248)
-    $lblUpdateInfo.Text = "Открываю релиз v$AppVersion на GitHub. Если появится 404, войдите в GitHub."
-    Start-Process "https://github.com/$UpdateRepo/releases/latest"
+    if ($script:DownloadActive) { return }
+    if ($script:UpdateCheckActive) { return }
+    if ($script:UpdateAvailable -and $script:LatestReleaseUrl) {
+        Start-AgentUpdateDownload
+        return
+    }
+    Test-UpdateAvailable
 })
 
 $existingOnOpen = Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1426,7 +1506,8 @@ if ($ReadOnly) {
     $lblWalletHint.Text = "Режим мониторинга: настройки и работа майнера не изменяются."
 }
 Poll-RealTelemetry -SkipExternal
-$lblUpdateInfo.Text = "Версия v$AppVersion. Нажмите «ПРОВЕРИТЬ ОБНОВЛЕНИЯ» для страницы релизов."
+$lblVersion.Text = "Установлена: v$AppVersion"
+$lblUpdateInfo.Text = "Нажмите «ПРОВЕРИТЬ ОБНОВЛЕНИЯ», чтобы проверить новую версию."
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000
@@ -1502,6 +1583,7 @@ $timer.Add_Tick({
 $form.Add_Shown({
     $form.Activate()
     $timer.Start()
+    Test-UpdateAvailable
 })
 
 [void]$form.ShowDialog()

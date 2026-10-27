@@ -49,7 +49,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.8"
+$AppVersion = "3.3.9"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:LatestReleaseUrl = $null
@@ -678,11 +678,14 @@ function Test-UpdateAvailable {
     $worker = New-Object System.ComponentModel.BackgroundWorker
     $worker.add_DoWork({
         param($sender, $e)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $repo = [string]$e.Argument
+        if ([string]::IsNullOrWhiteSpace($repo)) { throw "GitHub repository is not configured." }
         $ver = $null
         $assetUrl = $null
         $apiError = $null
         try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
             $ver = ([string]$rel.tag_name) -replace "^[vV]", ""
             foreach ($asset in $rel.assets) {
                 if ($asset.name -eq "PearlRigControl-Setup.exe") { $assetUrl = [string]$asset.browser_download_url; break }
@@ -696,7 +699,7 @@ function Test-UpdateAvailable {
         if (-not $ver -or -not $assetUrl) {
             $webResponse = $null
             try {
-                $request = [System.Net.HttpWebRequest]::Create("https://github.com/$UpdateRepo/releases/latest")
+                $request = [System.Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
                 $request.UserAgent = "PearlRigControl"
                 $request.Timeout = 10000
                 $request.AllowAutoRedirect = $true
@@ -705,7 +708,7 @@ function Test-UpdateAvailable {
                 $tag = [Uri]::UnescapeDataString($finalUri.Segments[-1].Trim('/'))
                 if ($tag -notmatch '^[vV]?\d+(\.\d+){1,3}$') { throw "GitHub latest release redirected to an unexpected address." }
                 $ver = $tag -replace "^[vV]", ""
-                if (-not $assetUrl) { $assetUrl = "https://github.com/$UpdateRepo/releases/download/$tag/PearlRigControl-Setup.exe" }
+                if (-not $assetUrl) { $assetUrl = "https://github.com/$repo/releases/download/$tag/PearlRigControl-Setup.exe" }
             } catch {
                 $pageError = $_.Exception.Message
                 if ($apiError) { throw "GitHub API failed ($apiError); latest release page failed ($pageError)." }
@@ -725,12 +728,16 @@ $script:UpdateCheckActive = $false
         $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
         $btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
         if ($e.Error) {
+            $errorMessage = [string]$e.Error.Message
+            if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = [string]$e.Error.ToString() }
+            if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = "Неизвестная ошибка запроса GitHub." }
             $script:UpdateAvailable = $false
             $script:LatestReleaseUrl = $null
             $lblVersion.Text = "Установлена: v$AppVersion"
             $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-            $lblUpdateInfo.Text = "GitHub недоступен: $($e.Error.Exception.Message)"
-            Write-AgentLog "ERROR" "Проверка обновлений не удалась: $($e.Error.Exception.Message)"
+            $lblUpdateInfo.Text = "GitHub недоступен: $errorMessage"
+            $tipAutoMode.SetToolTip($lblUpdateInfo, $errorMessage)
+            Write-AgentLog "ERROR" "Проверка обновлений не удалась: $errorMessage"
             $sender.Dispose()
             return
         }
@@ -762,7 +769,7 @@ $script:UpdateCheckActive = $false
         $sender.Dispose()
     })
     $script:UpdateCheckWorker = $worker
-    $worker.RunWorkerAsync()
+    $worker.RunWorkerAsync($UpdateRepo)
 }
 
 function Start-AgentUpdateDownload {

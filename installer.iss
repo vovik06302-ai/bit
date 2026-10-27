@@ -3,7 +3,7 @@
 [Setup]
 AppId={{8F9C2E41-5A7D-4E3B-9C12-7D8E4A2F6B90}
 AppName=Pearl Rig Control (dual4070ti)
-AppVersion=3.3.7
+AppVersion=3.3.8
 AppPublisher=Pearl Rig Control
 DefaultDirName={autopf}\PearlRigControl
 DefaultGroupName=Pearl Rig Control

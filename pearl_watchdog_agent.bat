@@ -49,7 +49,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.7"
+$AppVersion = "3.3.8"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:LatestReleaseUrl = $null
@@ -1337,11 +1337,40 @@ function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
 
 function Stop-ElevatedMinerProcess([int]$ProcessId) {
     if ($ProcessId -le 0) { return }
-    $command = "Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue"
+    $existing = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $existing) { return }
+    if ($existing.ProcessName -ine 'onezerominer') { throw "Refusing to signal unexpected process ID $ProcessId." }
+    $command = @'
+$ErrorActionPreference = 'Stop'
+$targetId = __TARGET_PID__
+$target = Get-Process -Id $targetId -ErrorAction SilentlyContinue
+if (-not $target) { exit 0 }
+if ($target.ProcessName -ine 'onezerominer') { exit 31 }
+$nativeSource = @"
+using System;
+using System.Runtime.InteropServices;
+public static class PearlConsoleControl {
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint processId);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint ctrlEvent, uint processGroupId);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
+}
+"@
+Add-Type -TypeDefinition $nativeSource -ErrorAction SilentlyContinue
+[void][PearlConsoleControl]::FreeConsole()
+if (-not [PearlConsoleControl]::AttachConsole([uint32]$targetId)) { exit 32 }
+[void][PearlConsoleControl]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)
+$sent = [PearlConsoleControl]::GenerateConsoleCtrlEvent(0, 0)
+[void][PearlConsoleControl]::FreeConsole()
+if (-not $sent) { exit 33 }
+if ($target.WaitForExit(12000)) { exit 0 }
+exit 34
+'@
+    $command = $command.Replace('__TARGET_PID__', [string]$ProcessId)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     $stopper = Start-Process -FilePath $powershellExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -Verb RunAs -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop
-    if ($stopper.ExitCode -ne 0) { throw "Windows could not stop OneZeroMiner (PID $ProcessId)." }
+    if ($stopper.ExitCode -ne 0) { throw "OneZeroMiner (PID $ProcessId) did not shut down after Ctrl+C (code $($stopper.ExitCode))." }
 }
 
 function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
@@ -1432,19 +1461,25 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
 
 function Stop-MinerProcess([string]$Reason = "Нажата кнопка «Стоп» пользователем") {
     if ($ReadOnly) { return }
-    $processes = @(Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue)
-    try {
-        foreach ($process in $processes) { Stop-ElevatedMinerProcess -ProcessId $process.Id }
-    } catch {
-        $lblStatus.Text = "Статус: майнер продолжает работать — Windows не подтвердила остановку."
-        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-        Write-AgentLog "ERROR" "Остановка OneZeroMiner отменена или отклонена Windows: $($_.Exception.Message)"
-        return
-    }
+    # Latch the user's intent before signaling the miner so the watchdog cannot restart it.
     $script:UserStoppedManually = $true
     $script:MiningDesired = $false
     $script:ReconnectStage = "idle"
     $script:DisconnectElapsedSec = 0
+    $processes = @(Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue)
+    try {
+        foreach ($process in $processes) { Stop-ElevatedMinerProcess -ProcessId $process.Id }
+        Start-Sleep -Milliseconds 300
+        $remaining = @(Get-Process -Name "onezerominer" -ErrorAction SilentlyContinue)
+        if ($remaining.Count -gt 0) { throw "OneZeroMiner is still running (PID $($remaining[0].Id))." }
+    } catch {
+        $script:IsMiningRunning = $true
+        $script:MinerPid = if ($remaining -and $remaining.Count -gt 0) { $remaining[0].Id } elseif ($processes.Count -gt 0) { $processes[0].Id } else { $null }
+        $lblStatus.Text = "Статус: майнер не остановился после Ctrl+C. Откройте его окно и нажмите Ctrl+C."
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        Write-AgentLog "ERROR" "Штатная остановка OneZeroMiner по Ctrl+C не подтверждена: $($_.Exception.Message)"
+        return
+    }
     $script:IsMiningRunning = $false
     $script:MinerPid = $null
 

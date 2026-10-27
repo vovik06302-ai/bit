@@ -1,5 +1,5 @@
 import { ScenarioCheckResult, GpuLiveMetrics, PoolLiveStatus } from '../types/rig';
-import { validatePearlWallet, DEFAULT_PEARL_WALLET } from './scriptGenerator';
+import { validatePearlWallet } from './scriptGenerator';
 
 export interface WatchdogStateInput {
   walletAddress: string;
@@ -359,13 +359,13 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
     !s3Reopen.miningActive;
 
   // 4. Неверный адрес (обрезанный адрес из старого конфига, seed-фраза, приватный ключ)
-  const vDefaultWallet = validatePearlWallet(DEFAULT_PEARL_WALLET);
-  const vTruncated = validatePearlWallet('[REMOVED_LOCAL_WALLET]');
-  const vSeed = validatePearlWallet('abandon ability able about above absent absorb abstract absurd abuse access accident');
-  const vPrivKey = validatePearlWallet('0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318');
+  const vUnsetWallet = validatePearlWallet('');
+  const vTruncated = validatePearlWallet(`prl1p${'q'.repeat(24)}`);
+  const vSeed = validatePearlWallet('seed phrase must not be entered');
+  const vPrivKey = validatePearlWallet(`0x${'0'.repeat(64)}`);
   const check4Passed =
-    vDefaultWallet.valid &&
-    vDefaultWallet.type === 'prl1p_taproot' &&
+    !vUnsetWallet.valid &&
+    vUnsetWallet.type === 'invalid' &&
     !vTruncated.valid &&
     vTruncated.type === 'truncated_prl' &&
     !vSeed.valid &&
@@ -608,11 +608,11 @@ export function runAllScenarioChecks(): ScenarioCheckResult[] {
     },
     {
       id: 'invalid-or-secret-wallet',
-      title: '4. Кошелёк по умолчанию / обрезанный адрес / seed-фраза',
+      title: '4. Адрес не задан / обрезанный адрес / seed-фраза',
       passed: check4Passed,
-      expected: 'Полный адрес [REMOVED_LOCAL_WALLET] принимается; обрезанный [REMOVED_LOCAL_WALLET], seed-фраза и приватный ключ отклоняются',
+      expected: 'Пустой адрес не задан по умолчанию; демонстрационный обрезанный адрес, seed-фраза и приватный ключ отклоняются',
       actual: check4Passed
-        ? 'Кошелёк по умолчанию (63 симв.) валиден; обрезанный адрес (29 симв.) и секретные фразы заблокированы валидатором'
+        ? 'Кошелёк отсутствует по умолчанию; пустой и обрезанный адреса, seed-фраза и приватный ключ обработаны валидатором'
         : 'Ошибка блокировки неверного адреса',
     },
     {

@@ -7,14 +7,27 @@ set "PS_AGENT=%TEMP%\pearl_rig_gui_supervisor.ps1"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$raw = [System.IO.File]::ReadAllText($env:SELF_BAT, [System.Text.Encoding]::UTF8); $marker = ':: ___PS_' + 'START___'; $idx = $raw.IndexOf($marker); if ($idx -ge 0) { $psCode = $raw.Substring($idx + $marker.Length).TrimStart(); $utf8Bom = New-Object System.Text.UTF8Encoding($true); [System.IO.File]::WriteAllText($env:PS_AGENT, $psCode, $utf8Bom) }"
 
-start "" powershell -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PS_AGENT%"
+start "" powershell -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "%PS_AGENT%" %*
 exit /b
 
 :: ___PS_START___
-param([switch]$ReadOnly)
+param([switch]$ReadOnly, [switch]$Startup, [switch]$AutoMine)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+$instanceCreated = $false
+$instanceName = "Local\PearlRigControl-$([Environment]::UserName)"
+$script:InstanceMutex = [System.Threading.Mutex]::new($true, $instanceName, [ref]$instanceCreated)
+if (-not $instanceCreated) {
+    try {
+        $showExisting = [System.Threading.EventWaitHandle]::OpenExisting("Local\PearlRigControl-Show-$([Environment]::UserName)")
+        $showExisting.Set() | Out-Null
+        $showExisting.Dispose()
+    } catch {}
+    $script:InstanceMutex.Dispose()
+    exit
+}
+$script:ShowPanelEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, "Local\PearlRigControl-Show-$([Environment]::UserName)")
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -36,7 +49,7 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.6"
+$AppVersion = "3.3.7"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:LatestReleaseUrl = $null
@@ -44,6 +57,12 @@ $script:UpdateAvailable = $false
 $script:UpdateCheckActive = $false
 $script:DownloadActive = $false
 $script:DownloadProgress = 0
+$script:AutoStartTaskName = 'PearlRigControl-AutoStart'
+$script:AutoStartMining = [bool]$AutoMine
+$script:IsStartupTaskLaunch = [bool]$Startup
+$script:TrayExitRequested = $false
+$script:InstanceMutex = $null
+$script:ShowPanelEvent = $null
 
 # Профиль для двух RTX 4070 Ti (без повышения напряжения):
 # PL 150 W, память 810 MHz, ядро 2400 MHz, kernel 2, кулер GPU0=65%, GPU1=* (авто)
@@ -84,9 +103,15 @@ if (Test-Path -LiteralPath $LocalSettingsFile) {
         if ($localSettings.electricityTariff -is [ValueType] -and [double]$localSettings.electricityTariff -ge 0) { $script:ElectricityTariff = [double]$localSettings.electricityTariff }
         if ($localSettings.totalGpuKWh -is [ValueType] -and [double]$localSettings.totalGpuKWh -ge 0) { $script:TotalGpuKWh = [double]$localSettings.totalGpuKWh }
         if ($localSettings.gpuPowerLimit -is [ValueType]) { $script:GpuPowerLimit = [int]$localSettings.gpuPowerLimit }
+        if ($localSettings.autoStartMining -is [bool]) { $script:AutoStartMining = [bool]$localSettings.autoStartMining }
         if ($localSettings.minerDir -and (Test-Path -LiteralPath (Join-Path ([string]$localSettings.minerDir) 'onezerominer.exe'))) { $MinerDir = [string]$localSettings.minerDir }
     } catch {}
 }
+try {
+    Import-Module ScheduledTasks -ErrorAction Stop
+    $script:AutoStartMining = $null -ne (Get-ScheduledTask -TaskName $script:AutoStartTaskName -ErrorAction SilentlyContinue)
+} catch { if ($Startup -or $AutoMine) { $script:AutoStartMining = $true } }
+if ($AutoMine) { $script:AutoStartMining = $true }
 $nvidiaCommand = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $nvidiaCommand) {
     $nvidiaCandidate = Join-Path $env:SystemRoot 'System32\nvidia-smi.exe'
@@ -116,11 +141,10 @@ if ($script:NvidiaSmiPath) {
 $script:GpuPowerLimit = [Math]::Max($script:GpuPowerMin, [Math]::Min($script:GpuPowerMax, $script:GpuPowerLimit))
 $CurrentPL = "$($script:GpuPowerLimit),$($script:GpuPowerLimit)"
 
-# Публичный адрес кошелька Pearl по умолчанию (только адрес выплат, без секретных ключей)
-$DefaultWallet = "[REMOVED_LOCAL_WALLET]"
-$Wallet = $DefaultWallet
-$WalletSaved = $true
-$WalletEditMode = $false
+# Адрес не вшивается в программу; он читается только из локального файла пользователя.
+$Wallet = ""
+$WalletSaved = $false
+$WalletEditMode = $true
 
 # Состояние процесса майнера: НЕ запускаем при установке или первом открытии
 $MiningDesired = $false
@@ -454,6 +478,29 @@ $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
 $lblUpdateInfo.Location = New-Object System.Drawing.Point(520, 214)
 $lblUpdateInfo.Size = New-Object System.Drawing.Size(565, 20)
 $form.Controls.Add($lblUpdateInfo)
+
+$btnAutoMode = New-Object System.Windows.Forms.Button
+$btnAutoMode.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$btnAutoMode.FlatStyle = "Flat"
+$btnAutoMode.Location = New-Object System.Drawing.Point(905, 210)
+$btnAutoMode.Size = New-Object System.Drawing.Size(180, 28)
+$btnAutoMode.Enabled = (-not $ReadOnly)
+$form.Controls.Add($btnAutoMode)
+$tipAutoMode = New-Object System.Windows.Forms.ToolTip
+$tipAutoMode.SetToolTip($btnAutoMode, "Автозапуск майнера при входе в Windows. Окно будет скрыто в область уведомлений.")
+
+function Update-AutoModeButton {
+    if ($script:AutoStartMining) {
+        $btnAutoMode.Text = "АВТОЗАПУСК: ВКЛ"
+        $btnAutoMode.BackColor = [System.Drawing.Color]::FromArgb(16, 185, 129)
+        $btnAutoMode.ForeColor = [System.Drawing.Color]::FromArgb(11, 15, 23)
+    } else {
+        $btnAutoMode.Text = "РУЧНОЙ РЕЖИМ"
+        $btnAutoMode.BackColor = [System.Drawing.Color]::FromArgb(51, 65, 85)
+        $btnAutoMode.ForeColor = [System.Drawing.Color]::White
+    }
+}
+Update-AutoModeButton
 
 $lblTariff = New-Object System.Windows.Forms.Label
 $lblTariff.Text = "Тариф ₽/кВт·ч"
@@ -832,6 +879,30 @@ $txtLog.Location = New-Object System.Drawing.Point(20, 660)
 $txtLog.Size = New-Object System.Drawing.Size(1160, 190)
 $form.Controls.Add($txtLog)
 
+$script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
+$script:TrayIcon.Text = "Pearl Rig Control — майнер остановлен"
+$trayIconPath = Join-Path $InstalledAppDir 'pearl-icon.ico'
+try {
+    if (Test-Path -LiteralPath $trayIconPath) { $script:TrayIcon.Icon = New-Object System.Drawing.Icon($trayIconPath) }
+    else { $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application }
+} catch { $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application }
+$script:TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$script:TrayStatusItem = $script:TrayMenu.Items.Add("Состояние: майнер остановлен")
+$script:TrayStatusItem.Enabled = $false
+[void]$script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$script:TrayOpenItem = $script:TrayMenu.Items.Add("Открыть панель")
+$script:TrayStartItem = $script:TrayMenu.Items.Add("Запустить майнер")
+$script:TrayStopItem = $script:TrayMenu.Items.Add("Остановить майнер")
+[void]$script:TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$script:TrayExitItem = $script:TrayMenu.Items.Add("Остановить майнер и закрыть")
+$script:TrayIcon.ContextMenuStrip = $script:TrayMenu
+$script:TrayIcon.Visible = [bool]$Startup
+
+if ($Startup) {
+    $form.ShowInTaskbar = $false
+    $form.Opacity = 0
+}
+
 function Update-WindowLayout {
     $w = $form.ClientSize.Width
     $h = $form.ClientSize.Height
@@ -848,9 +919,11 @@ function Update-WindowLayout {
     $lblWalletHint.Width = $grpWallet.ClientSize.Width - 24
     $btnCheckUpdate.Left = $right - $btnCheckUpdate.Width
     $btnFullscreen.Left = $btnCheckUpdate.Left - $btnFullscreen.Width - 12
-    $lblVersion.Left = 345
+    $btnAutoMode.Left = $right - $btnAutoMode.Width
     $lblUpdateInfo.Left = 520
-    $lblUpdateInfo.Width = [Math]::Max(300, $w - $lblUpdateInfo.Left - 20)
+    $lblUpdateInfo.Width = [Math]::Max(180, $btnAutoMode.Left - $lblUpdateInfo.Left - 10)
+    $lblVersion.Left = 345
+    $btnAutoMode.Top = 210
     $pbarDownload.Width = $w - 40
     $btnApplyGpuPower.Left = $right - $btnApplyGpuPower.Width
     $lblGpuPowerValue.Left = $btnApplyGpuPower.Left - $lblGpuPowerValue.Width - 8
@@ -961,6 +1034,12 @@ function Toggle-Fullscreen {
     Update-WindowLayout
 }
 $form.Add_Resize({ Update-WindowLayout })
+$form.Add_Resize({
+    if ($script:IsStartupTaskLaunch -and $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        $form.Hide()
+        $form.ShowInTaskbar = $false
+    }
+})
 $form.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:IsFullscreen) { Toggle-Fullscreen } })
 $btnFullscreen.Add_Click({ Toggle-Fullscreen })
 
@@ -1055,8 +1134,88 @@ function Update-OfficialRates {
 }
 
 function Save-LocalRigSettings {
-    $payload = @{ electricityTariff = $script:ElectricityTariff; totalGpuKWh = $script:TotalGpuKWh; gpuPowerLimit = $script:GpuPowerLimit; minerDir = $MinerDir; updatedAt = (Get-Date).ToString("o") } | ConvertTo-Json
+    $payload = @{ electricityTariff = $script:ElectricityTariff; totalGpuKWh = $script:TotalGpuKWh; gpuPowerLimit = $script:GpuPowerLimit; autoStartMining = $script:AutoStartMining; minerDir = $MinerDir; updatedAt = (Get-Date).ToString("o") } | ConvertTo-Json
     [System.IO.File]::WriteAllText($LocalSettingsFile, $payload, [System.Text.Encoding]::UTF8)
+}
+
+function Set-AutoStartMining([bool]$Enable) {
+    if ($ReadOnly) { throw "Режим мониторинга не может менять автозапуск." }
+    $verb = if ($Enable) { "включить" } else { "отключить" }
+    $detail = if ($Enable) { "При следующем входе в Windows майнер запустится автоматически в фоне. Панель будет доступна из значка в области уведомлений. Сейчас майнер запускаться не будет." } else { "При следующих входах в Windows автозапуск майнера будет выключен. Уже работающий майнер продолжит работу." }
+    $answer = [System.Windows.Forms.MessageBox]::Show("Вы хотите $verb автозапуск майнера?`r`n`r`n$detail`r`n`r`nДля сохранения режима Windows один раз запросит права администратора.", "Режим запуска Pearl Rig Control", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    $launcher = Join-Path $InstalledAppDir 'pearl_watchdog_agent.bat'
+    if (-not (Test-Path -LiteralPath $launcher)) { throw "Не найден установленный файл запуска: $launcher" }
+    $escapedLauncher = $launcher.Replace("'", "''")
+    $escapedTaskName = $script:AutoStartTaskName.Replace("'", "''")
+    $escapedUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Replace("'", "''")
+    $enableFlag = if ($Enable) { '1' } else { '0' }
+    $taskScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $taskName = '__TASK_NAME__'
+    if ('__ENABLE__' -eq '1') {
+        $launcher = '__LAUNCHER__'
+        $user = '__USER__'
+        $startCommand = "& '$launcher' -Startup -AutoMine"
+        $encodedStart = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startCommand))
+        $powershellExe = Join-Path $PSHOME 'powershell.exe'
+        $arguments = "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $encodedStart"
+        $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $arguments
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    } else {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    exit 0
+} catch {
+    Write-Error $_
+    exit 1
+}
+'@
+    $taskScript = $taskScript.Replace('__TASK_NAME__', $escapedTaskName).Replace('__LAUNCHER__', $escapedLauncher).Replace('__USER__', $escapedUser).Replace('__ENABLE__', $enableFlag)
+    $encodedTask = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($taskScript))
+    $powershellExe = Join-Path $PSHOME 'powershell.exe'
+    $taskUpdate = Start-Process -FilePath $powershellExe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encodedTask) -Verb RunAs -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop
+    if ($taskUpdate.ExitCode -ne 0) { throw "Windows could not update the startup task (exit code $($taskUpdate.ExitCode))." }
+
+    $script:AutoStartMining = $Enable
+    Save-LocalRigSettings
+    Update-AutoModeButton
+    if (-not $Enable -and $script:IsStartupTaskLaunch) {
+        $script:IsStartupTaskLaunch = $false
+        $script:TrayIcon.Visible = $false
+        Show-RigPanelFromTray
+    }
+    if ($Enable) {
+        Write-AgentLog "OK" "Автозапуск майнера включён: при следующем входе в Windows панель откроется в системном трее и запустит майнер. Текущий майнер не запускался."
+        $lblStatus.Text = "Статус: автозапуск включён для следующего входа в Windows; сейчас майнер не запускался."
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+    } else {
+        Write-AgentLog "INFO" "Автозапуск майнера отключён. Текущий процесс майнера не затронут."
+        $lblStatus.Text = "Статус: ручной режим — автозапуск при входе в Windows отключён."
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+    }
+}
+
+function Update-TrayStatus {
+    if (-not $script:TrayIcon) { return }
+    $stateText = if ($script:IsMiningRunning) { "Майнер работает (PID $($script:MinerPid))" } else { "Майнер остановлен" }
+    $script:TrayIcon.Text = "Pearl Rig Control — $stateText"
+    if ($script:TrayStatusItem) { $script:TrayStatusItem.Text = "Состояние: $stateText" }
+    if ($script:TrayStartItem) { $script:TrayStartItem.Enabled = -not $script:IsMiningRunning }
+    if ($script:TrayStopItem) { $script:TrayStopItem.Enabled = [bool]$script:IsMiningRunning }
+}
+
+function Show-RigPanelFromTray {
+    $form.ShowInTaskbar = $true
+    $form.Opacity = 1
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Visible = $true
+    $form.Activate()
 }
 
 function Apply-GpuPowerLimit([int]$Watts) {
@@ -1113,6 +1272,7 @@ function Update-TelemetryDisplay {
     $powerCurrent = if ($null -eq $totalPower) { "нет данных" } else { "$(Format-Metric $totalPower ' Вт')  ($totalPowerKwText)" }
     $powerCost = if ($null -eq $energyCost) { "укажите тариф" } else { "$(Format-Metric $energyCost ' ₽')" }
     $lblPowerPanel.Text = "ФАКТИЧЕСКОЕ ПОТРЕБЛЕНИЕ GPU · nvidia-smi`r`nСейчас всего: $powerCurrent · GPU0: $(Format-Metric $script:Gpu0Power ' Вт') · GPU1: $(Format-Metric $script:Gpu1Power ' Вт')`r`nНакоплено с этой панелью: $(Format-Metric $script:TotalGpuKWh ' кВт·ч')`r`nСтоимость по введённому тарифу: $powerCost · тариф: $(Format-Metric $script:ElectricityTariff ' ₽/кВт·ч')`r`nПотребление системы/розетки не измеряется этими датчиками."
+    Update-TrayStatus
 }
 
 function Poll-RealTelemetry([switch]$Force, [switch]$SkipExternal) {
@@ -1237,10 +1397,18 @@ function Start-MinerProcess([bool]$IsWatchdogRestart = $false) {
 
     Set-Location $MinerDir
     $minerArgs = "-a pearl -w $($script:Wallet) -o $Pool1 --worker $Worker --cclk $CurrentCClk --mclk $CurrentMClk --pl $CurrentPL --kernel $CurrentKernel --fan $CurrentFan --api-port $ApiPort --log-file `"$LogFile`""
-    $lblStatus.Text = "Статус: ожидается разрешение Windows для настройки частот и охлаждения GPU..."
-    Write-AgentLog "INFO" "Запрашивается разрешение Windows для запуска OneZeroMiner с настройками GPU."
     try {
-        $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WorkingDirectory $MinerDir -WindowStyle Normal -Verb RunAs -PassThru -ErrorAction Stop
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $isElevated = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($script:IsStartupTaskLaunch -and -not $isElevated) { throw "Автозадача не запущена с правами администратора; для безопасности майнер не запущен." }
+        if ($isElevated) {
+            $lblStatus.Text = "Статус: запуск майнера в фоне..."
+            $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WorkingDirectory $MinerDir -WindowStyle Hidden -PassThru -ErrorAction Stop
+        } else {
+            $lblStatus.Text = "Статус: ожидается разрешение Windows для настройки GPU..."
+            Write-AgentLog "INFO" "Запрашивается разрешение Windows для запуска OneZeroMiner с настройками GPU."
+            $started = Start-Process -FilePath "$MinerDir\onezerominer.exe" -ArgumentList $minerArgs -WorkingDirectory $MinerDir -WindowStyle Normal -Verb RunAs -PassThru -ErrorAction Stop
+        }
     } catch {
         $script:MiningDesired = $false
         $script:IsMiningRunning = $false
@@ -1442,6 +1610,25 @@ $btnEditWallet.Add_Click({
 
 $btnStart.Add_Click({ Start-MinerProcess -IsWatchdogRestart $false })
 $btnStop.Add_Click({ Stop-MinerProcess "Явная остановка пользователем (кнопка Стоп)" })
+$btnAutoMode.Add_Click({
+    try { Set-AutoStartMining -Enable (-not $script:AutoStartMining) }
+    catch {
+        Write-AgentLog "ERROR" "Не удалось изменить режим автозапуска: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Не удалось изменить режим автозапуска.`r`n`r`n$($_.Exception.Message)", "Автозапуск Pearl Rig Control", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+})
+$script:TrayOpenItem.Add_Click({
+    Show-RigPanelFromTray
+})
+$script:TrayIcon.Add_DoubleClick({ Show-RigPanelFromTray })
+$script:TrayStartItem.Add_Click({ Start-MinerProcess -IsWatchdogRestart $false })
+$script:TrayStopItem.Add_Click({ Stop-MinerProcess "Остановка через значок области уведомлений" })
+$script:TrayExitItem.Add_Click({
+    if ($script:IsMiningRunning) { Stop-MinerProcess "Остановка перед закрытием из области уведомлений" }
+    if ($script:IsMiningRunning) { return }
+    $script:TrayExitRequested = $true
+    $form.Close()
+})
 $btnRefreshNow.Add_Click({ Poll-RealTelemetry -Force })
 $btnApplyGpuPower.Add_Click({
     $btnApplyGpuPower.Enabled = $false
@@ -1468,7 +1655,16 @@ $btnSaveTariff.Add_Click({
     Update-TelemetryDisplay
 })
 
-$form.Add_FormClosing({ try { Save-LocalRigSettings } catch {} })
+$form.Add_FormClosing({
+    if ($script:IsStartupTaskLaunch -and $_.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing -and -not $script:TrayExitRequested) {
+        $_.Cancel = $true
+        $form.Hide()
+        $form.ShowInTaskbar = $false
+        return
+    }
+    try { Save-LocalRigSettings } catch {}
+    if ($script:TrayIcon) { $script:TrayIcon.Visible = $false }
+})
 
 # Проверка и скачивание обновлений нативной Windows-программы из GitHub Releases.
 $btnCheckUpdate.Add_Click({
@@ -1515,6 +1711,7 @@ $tickSec = 0
 
 $timer.Add_Tick({
     Poll-RealTelemetry
+    if ($script:ShowPanelEvent -and $script:ShowPanelEvent.WaitOne(0)) { Show-RigPanelFromTray }
 
     if ($httpListener.IsListening) {
         try {
@@ -1581,11 +1778,29 @@ $timer.Add_Tick({
 })
 
 $form.Add_Shown({
-    $form.Activate()
+    if ($script:IsStartupTaskLaunch) {
+        $form.ShowInTaskbar = $false
+        $form.Hide()
+    } else {
+        $form.Opacity = 1
+        $form.Activate()
+    }
     $timer.Start()
     Test-UpdateAvailable
+    if ($AutoMine) {
+        Update-TrayStatus
+        Start-MinerProcess -IsWatchdogRestart $false
+    }
 })
 
 [void]$form.ShowDialog()
 $timer.Stop()
 if ($httpListener.IsListening) { $httpListener.Stop() }
+if ($script:TrayIcon) { $script:TrayIcon.Visible = $false; $script:TrayIcon.Dispose() }
+if ($script:TrayMenu) { $script:TrayMenu.Dispose() }
+if ($tipAutoMode) { $tipAutoMode.Dispose() }
+if ($script:InstanceMutex) {
+    try { $script:InstanceMutex.ReleaseMutex() } catch {}
+    $script:InstanceMutex.Dispose()
+}
+if ($script:ShowPanelEvent) { $script:ShowPanelEvent.Dispose() }

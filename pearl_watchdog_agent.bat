@@ -678,13 +678,43 @@ function Test-UpdateAvailable {
     $worker = New-Object System.ComponentModel.BackgroundWorker
     $worker.add_DoWork({
         param($sender, $e)
-        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
-        $ver = ([string]$rel.tag_name) -replace "^[vV]", ""
-        if (-not $ver) { throw "GitHub returned a release without tag_name." }
+        $ver = $null
         $assetUrl = $null
-        foreach ($asset in $rel.assets) {
-            if ($asset.name -eq "PearlRigControl-Setup.exe") { $assetUrl = [string]$asset.browser_download_url; break }
+        $apiError = $null
+        try {
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
+            $ver = ([string]$rel.tag_name) -replace "^[vV]", ""
+            foreach ($asset in $rel.assets) {
+                if ($asset.name -eq "PearlRigControl-Setup.exe") { $assetUrl = [string]$asset.browser_download_url; break }
+            }
+        } catch {
+            $apiError = $_.Exception.Message
         }
+
+        # Public REST calls can be rate-limited. Resolve /releases/latest via its
+        # redirect and construct the stable asset URL as a fallback.
+        if (-not $ver -or -not $assetUrl) {
+            $webResponse = $null
+            try {
+                $request = [System.Net.HttpWebRequest]::Create("https://github.com/$UpdateRepo/releases/latest")
+                $request.UserAgent = "PearlRigControl"
+                $request.Timeout = 10000
+                $request.AllowAutoRedirect = $true
+                $webResponse = $request.GetResponse()
+                $finalUri = $webResponse.ResponseUri
+                $tag = [Uri]::UnescapeDataString($finalUri.Segments[-1].Trim('/'))
+                if ($tag -notmatch '^[vV]?\d+(\.\d+){1,3}$') { throw "GitHub latest release redirected to an unexpected address." }
+                $ver = $tag -replace "^[vV]", ""
+                if (-not $assetUrl) { $assetUrl = "https://github.com/$UpdateRepo/releases/download/$tag/PearlRigControl-Setup.exe" }
+            } catch {
+                $pageError = $_.Exception.Message
+                if ($apiError) { throw "GitHub API failed ($apiError); latest release page failed ($pageError)." }
+                throw "Latest release lookup failed ($pageError)."
+            } finally {
+                if ($webResponse) { $webResponse.Close() }
+            }
+        }
+        if (-not $ver -or -not $assetUrl) { throw "Latest release has no PearlRigControl-Setup.exe asset." }
         $e.Result = @{ Version = $ver; Url = $assetUrl }
     })
     $worker.add_RunWorkerCompleted({

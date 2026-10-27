@@ -53,6 +53,24 @@ jobs:
           $fs.Close()
           $bmp.Dispose()
 
+      - name: Download and verify official OneZeroMiner
+        shell: pwsh
+        run: |
+          $archive = 'onezerominer-win64-1.8.3.zip'
+          $url = 'https://github.com/OneZeroMiner/onezerominer/releases/download/v1.8.3/onezerominer-win64-1.8.3.zip'
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $expected = 'bdbd0faf6144237bf4d975e4160f83c9ed8f00d291270f4fa42e037de220f209'
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "OneZeroMiner SHA256 mismatch: $actual" }
+          $stage = Join-Path $PWD 'miner'
+          $expanded = Join-Path $PWD 'miner-expanded'
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded
+          $package = Join-Path $expanded 'onezerominer-win64-1.8.3'
+          if (-not (Test-Path (Join-Path $package 'onezerominer.exe'))) { throw 'Official OneZeroMiner executable was not found in the archive' }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -Path (Join-Path $package '*') -Destination $stage -Recurse -Force
+          if (-not (Test-Path (Join-Path $stage 'onezerominer.exe'))) { throw 'OneZeroMiner staging failed' }
+
       - name: Compile Windows installer
         shell: pwsh
         run: |

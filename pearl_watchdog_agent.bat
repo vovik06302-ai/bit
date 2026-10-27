@@ -49,14 +49,17 @@ $ZeroHashLimitSec = 90
 $MaxRestartAttempts = 3
 
 # Текущая версия агента и канал проверки обновлений (GitHub Releases)
-$AppVersion = "3.3.9"
+$AppVersion = "3.3.10"
 $UpdateRepo = "vovik06302-ai/bit"
 $script:LatestVersion = $null
 $script:LatestReleaseUrl = $null
 $script:UpdateAvailable = $false
 $script:UpdateCheckActive = $false
+$script:UpdateCheckWork = $null
 $script:DownloadActive = $false
 $script:DownloadProgress = 0
+$script:DownloadProgressState = $null
+$script:UpdateDownloadWork = $null
 $script:AutoStartTaskName = 'PearlRigControl-AutoStart'
 $script:AutoStartMining = [bool]$AutoMine
 $script:IsStartupTaskLaunch = [bool]$Startup
@@ -653,6 +656,31 @@ function Stop-FireProgressBar {
     $script:updateLayer = $null
 }
 
+function Start-BackgroundPowerShell([string]$ScriptText, [object[]]$Arguments) {
+    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspace.Open()
+    $powerShell = [System.Management.Automation.PowerShell]::Create()
+    $powerShell.Runspace = $runspace
+    [void]$powerShell.AddScript($ScriptText)
+    foreach ($argument in $Arguments) { [void]$powerShell.AddArgument($argument) }
+    try {
+        $async = $powerShell.BeginInvoke()
+        return @{ PowerShell = $powerShell; Runspace = $runspace; Async = $async }
+    } catch {
+        $powerShell.Dispose()
+        $runspace.Dispose()
+        throw
+    }
+}
+
+function Dispose-BackgroundPowerShell($Work) {
+    if (-not $Work) { return }
+    try { $Work.PowerShell.Dispose() } catch {}
+    try { $Work.Runspace.Dispose() } catch {}
+}
+
 function Get-GitHubLatestRelease {
     try {
         $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$UpdateRepo/releases/latest" -Method Get -TimeoutSec 8 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
@@ -668,6 +696,66 @@ function Get-GitHubLatestRelease {
     }
 }
 
+function Complete-UpdateCheck {
+    $work = $script:UpdateCheckWork
+    if (-not $work) { return }
+    $script:UpdateCheckWork = $null
+    $errorMessage = $null
+    $latest = $null
+    try {
+        $results = @($work.PowerShell.EndInvoke($work.Async))
+        if ($results.Count -gt 0) { $latest = $results[$results.Count - 1] }
+        if (-not $latest) { throw "GitHub lookup returned no release data." }
+    } catch {
+        $errorMessage = [string]$_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = [string]$_.Exception.ToString() }
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = "Не удалось получить результат проверки GitHub." }
+    } finally {
+        Dispose-BackgroundPowerShell $work
+    }
+
+    $script:UpdateCheckActive = $false
+    $btnCheckUpdate.Enabled = $true
+    $btnCheckUpdate.Text = "ПРОВЕРИТЬ v$AppVersion"
+    $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
+    $btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
+    if ($errorMessage) {
+        $script:UpdateAvailable = $false
+        $script:LatestReleaseUrl = $null
+        $lblVersion.Text = "Установлена: v$AppVersion"
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "Проверка GitHub не удалась. Подробности в журнале."
+        $tipAutoMode.SetToolTip($lblUpdateInfo, $errorMessage)
+        Write-AgentLog "ERROR" "Проверка обновлений не удалась: $errorMessage"
+        return
+    }
+
+    $script:LatestVersion = [string]$latest.Version
+    $script:LatestReleaseUrl = [string]$latest.Url
+    try { $script:UpdateAvailable = ([System.Version]$latest.Version -gt [System.Version]$AppVersion) }
+    catch { $script:UpdateAvailable = ($latest.Version -ne $AppVersion) }
+    $lblVersion.Text = "Установлена: v$AppVersion"
+    if ($script:UpdateAvailable -and $latest.Url) {
+        $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
+        $lblUpdateInfo.Text = "ВЫШЛА НОВАЯ ВЕРСИЯ v$($latest.Version). Нажмите «СКАЧАТЬ»."
+        $btnCheckUpdate.Text = "СКАЧАТЬ v$($latest.Version)"
+        $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(234, 88, 12)
+        $btnCheckUpdate.ForeColor = [System.Drawing.Color]::White
+        Write-AgentLog "OK" "Обнаружена новая версия агента: v$($latest.Version) (установлена v$AppVersion)."
+    } elseif ($script:UpdateAvailable) {
+        $script:UpdateAvailable = $false
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "v$($latest.Version) вышла, но установщик не найден в релизе."
+        Write-AgentLog "ERROR" "В релизе v$($latest.Version) отсутствует PearlRigControl-Setup.exe."
+    } else {
+        $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+        $lblUpdateInfo.Text = "Установлена последняя версия v$AppVersion."
+        Write-AgentLog "INFO" "Проверка обновлений: установлена актуальная версия v$AppVersion."
+    }
+}
+
 function Test-UpdateAvailable {
     if ($script:UpdateCheckActive -or $script:DownloadActive) { return }
     $script:UpdateCheckActive = $true
@@ -675,101 +763,86 @@ function Test-UpdateAvailable {
     $lblUpdateInfo.Text = "Проверяю последнюю версию на GitHub..."
     $btnCheckUpdate.Text = "ПРОВЕРКА..."
     $btnCheckUpdate.Enabled = $false
-    $worker = New-Object System.ComponentModel.BackgroundWorker
-    $worker.add_DoWork({
-        param($sender, $e)
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $repo = [string]$e.Argument
-        if ([string]::IsNullOrWhiteSpace($repo)) { throw "GitHub repository is not configured." }
-        $ver = $null
-        $assetUrl = $null
-        $apiError = $null
-        try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
-            $ver = ([string]$rel.tag_name) -replace "^[vV]", ""
-            foreach ($asset in $rel.assets) {
-                if ($asset.name -eq "PearlRigControl-Setup.exe") { $assetUrl = [string]$asset.browser_download_url; break }
-            }
-        } catch {
-            $apiError = $_.Exception.Message
-        }
-
-        # Public REST calls can be rate-limited. Resolve /releases/latest via its
-        # redirect and construct the stable asset URL as a fallback.
-        if (-not $ver -or -not $assetUrl) {
-            $webResponse = $null
-            try {
-                $request = [System.Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
-                $request.UserAgent = "PearlRigControl"
-                $request.Timeout = 10000
-                $request.AllowAutoRedirect = $true
-                $webResponse = $request.GetResponse()
-                $finalUri = $webResponse.ResponseUri
-                $tag = [Uri]::UnescapeDataString($finalUri.Segments[-1].Trim('/'))
-                if ($tag -notmatch '^[vV]?\d+(\.\d+){1,3}$') { throw "GitHub latest release redirected to an unexpected address." }
-                $ver = $tag -replace "^[vV]", ""
-                if (-not $assetUrl) { $assetUrl = "https://github.com/$repo/releases/download/$tag/PearlRigControl-Setup.exe" }
-            } catch {
-                $pageError = $_.Exception.Message
-                if ($apiError) { throw "GitHub API failed ($apiError); latest release page failed ($pageError)." }
-                throw "Latest release lookup failed ($pageError)."
-            } finally {
-                if ($webResponse) { $webResponse.Close() }
-            }
-        }
-        if (-not $ver -or -not $assetUrl) { throw "Latest release has no PearlRigControl-Setup.exe asset." }
-        $e.Result = @{ Version = $ver; Url = $assetUrl }
-    })
-    $worker.add_RunWorkerCompleted({
-        param($sender, $e)
-$script:UpdateCheckActive = $false
+    $checkScript = @'
+param($repo)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+if ([string]::IsNullOrWhiteSpace([string]$repo)) { throw "GitHub repository is not configured." }
+$ver = $null
+$assetUrl = $null
+$apiError = $null
+try {
+    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Method Get -TimeoutSec 10 -Headers @{ "User-Agent" = "PearlRigControl"; "Accept" = "application/vnd.github+json" } -ErrorAction Stop
+    $ver = ([string]$rel.tag_name) -replace "^[vV]", ""
+    foreach ($asset in $rel.assets) { if ($asset.name -eq "PearlRigControl-Setup.exe") { $assetUrl = [string]$asset.browser_download_url; break } }
+} catch { $apiError = $_.Exception.Message }
+if (-not $ver -or -not $assetUrl) {
+    $webResponse = $null
+    try {
+        $request = [System.Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
+        $request.UserAgent = "PearlRigControl"
+        $request.Timeout = 10000
+        $request.AllowAutoRedirect = $true
+        $webResponse = $request.GetResponse()
+        $tag = [Uri]::UnescapeDataString($webResponse.ResponseUri.Segments[-1].Trim('/'))
+        if ($tag -notmatch '^[vV]?\d+(\.\d+){1,3}$') { throw "GitHub latest release redirected to an unexpected address." }
+        $ver = $tag -replace "^[vV]", ""
+        if (-not $assetUrl) { $assetUrl = "https://github.com/$repo/releases/download/$tag/PearlRigControl-Setup.exe" }
+    } catch {
+        $pageError = $_.Exception.Message
+        if ($apiError) { throw "GitHub API failed ($apiError); latest release page failed ($pageError)." }
+        throw "Latest release lookup failed ($pageError)."
+    } finally { if ($webResponse) { $webResponse.Close() } }
+}
+if (-not $ver -or -not $assetUrl) { throw "Latest release has no PearlRigControl-Setup.exe asset." }
+return @{ Version = $ver; Url = $assetUrl }
+'@
+    try {
+        $script:UpdateCheckWork = Start-BackgroundPowerShell -ScriptText $checkScript -Arguments @($UpdateRepo)
+    } catch {
+        $script:UpdateCheckActive = $false
         $btnCheckUpdate.Enabled = $true
         $btnCheckUpdate.Text = "ПРОВЕРИТЬ v$AppVersion"
-        $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(30, 41, 59)
-        $btnCheckUpdate.ForeColor = [System.Drawing.Color]::FromArgb(125, 211, 252)
-        if ($e.Error) {
-            $errorMessage = [string]$e.Error.Message
-            if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = [string]$e.Error.ToString() }
-            if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = "Неизвестная ошибка запроса GitHub." }
-            $script:UpdateAvailable = $false
-            $script:LatestReleaseUrl = $null
-            $lblVersion.Text = "Установлена: v$AppVersion"
-            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-            $lblUpdateInfo.Text = "GitHub недоступен: $errorMessage"
-            $tipAutoMode.SetToolTip($lblUpdateInfo, $errorMessage)
-            Write-AgentLog "ERROR" "Проверка обновлений не удалась: $errorMessage"
-            $sender.Dispose()
-            return
-        }
-        $latest = $e.Result
-        $script:LatestVersion = $latest.Version
-        $script:LatestReleaseUrl = $latest.Url
-        try { $script:UpdateAvailable = ([System.Version]$latest.Version -gt [System.Version]$AppVersion) }
-        catch { $script:UpdateAvailable = ($latest.Version -ne $AppVersion) }
-        $lblVersion.Text = "Установлена: v$AppVersion"
-        if ($script:UpdateAvailable -and $latest.Url) {
-            $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
-            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(251, 146, 60)
-            $lblUpdateInfo.Text = "ВЫШЛА НОВАЯ ВЕРСИЯ v$($latest.Version). Нажмите «СКАЧАТЬ»."
-            $btnCheckUpdate.Text = "СКАЧАТЬ v$($latest.Version)"
-            $btnCheckUpdate.BackColor = [System.Drawing.Color]::FromArgb(234, 88, 12)
-            $btnCheckUpdate.ForeColor = [System.Drawing.Color]::White
-            Write-AgentLog "OK" "Обнаружена новая версия агента: v$($latest.Version) (установлена v$AppVersion)."
-        } elseif ($script:UpdateAvailable) {
-            $script:UpdateAvailable = $false
-            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-            $lblUpdateInfo.Text = "v$($latest.Version) вышла, но установщик не найден в релизе."
-            Write-AgentLog "ERROR" "В релизе v$($latest.Version) отсутствует PearlRigControl-Setup.exe."
-        } else {
-            $lblVersion.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
-            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
-            $lblUpdateInfo.Text = "Установлена последняя версия v$AppVersion."
-            Write-AgentLog "INFO" "Проверка обновлений: установлена актуальная версия v$AppVersion."
-        }
-        $sender.Dispose()
-    })
-    $script:UpdateCheckWorker = $worker
-    $worker.RunWorkerAsync($UpdateRepo)
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "Не удалось запустить проверку GitHub."
+        Write-AgentLog "ERROR" "Не удалось создать пространство проверки обновлений: $($_.Exception.Message)"
+    }
+}
+
+function Complete-UpdateDownload {
+    $work = $script:UpdateDownloadWork
+    if (-not $work) { return }
+    $script:UpdateDownloadWork = $null
+    $result = $null
+    $errorMessage = $null
+    try {
+        $results = @($work.PowerShell.EndInvoke($work.Async))
+        if ($results.Count -gt 0) { $result = $results[$results.Count - 1] }
+        if (-not $result) { throw "Download worker returned no result." }
+    } catch {
+        $errorMessage = [string]$_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = [string]$_.Exception.ToString() }
+        if ([string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage = "Не удалось получить результат загрузки." }
+    } finally {
+        Dispose-BackgroundPowerShell $work
+        $script:DownloadProgressState = $null
+        $script:DownloadActive = $false
+        Stop-FireProgressBar
+        $pbarDownload.Visible = $false
+        $btnCheckUpdate.Enabled = $true
+    }
+    if ($errorMessage) {
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "Загрузка обновления не удалась. Подробности в журнале."
+        $tipAutoMode.SetToolTip($lblUpdateInfo, $errorMessage)
+        Write-AgentLog "ERROR" "Сбой при загрузке обновления: $errorMessage"
+        return
+    }
+    $pbarDownload.Value = 100
+    $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
+    $lblUpdateInfo.Text = "v$($result.Version) загружена. Установщик готов."
+    Write-AgentLog "OK" "Новая версия v$($result.Version) загружена в $($result.Path), $($result.Bytes) байт."
+    $confirm = [System.Windows.Forms.MessageBox]::Show("Установщик v$($result.Version) загружен.`n`nЗапустить установку сейчас?", "Обновление готово", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($confirm -eq [System.Windows.Forms.DialogResult]::Yes) { Start-Process -FilePath $result.Path }
 }
 
 function Start-AgentUpdateDownload {
@@ -783,6 +856,7 @@ function Start-AgentUpdateDownload {
     }
     $script:DownloadActive = $true
     $script:DownloadProgress = 0
+    $script:DownloadProgressState = [hashtable]::Synchronized(@{ Done = [long]0; Total = [long]0; Version = [string]$latest.Version })
     $pbarDownload.Value = 1
     $pbarDownload.Visible = $true
     Start-FireProgressBar
@@ -792,85 +866,55 @@ function Start-AgentUpdateDownload {
     Write-AgentLog "INFO" "Начата загрузка новой версии агента v$($latest.Version): $($latest.Url)"
 
     $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) "PearlRigControl-Setup-$($latest.Version).exe"
-    $worker = New-Object System.ComponentModel.BackgroundWorker
-    $worker.WorkerReportsProgress = $true
-    $worker.add_DoWork({
-        param($sender, $e)
-        $job = $e.Argument
-        $response = $null; $inputStream = $null; $outputStream = $null
-        try {
-            $req = [System.Net.HttpWebRequest]::Create($job.Url)
-            $req.UserAgent = "PearlRigControl"
-            $req.AllowAutoRedirect = $true
-            $req.Timeout = 30000
-            $req.ReadWriteTimeout = 30000
-            $response = $req.GetResponse()
-            $total = [long]$response.ContentLength
-            $inputStream = $response.GetResponseStream()
-            $outputStream = [System.IO.File]::Create($job.Path)
-            $buffer = New-Object byte[] 65536
-            [long]$done = 0
-            $lastPct = -1
-            while ($true) {
-                $read = $inputStream.Read($buffer, 0, $buffer.Length)
-                if ($read -le 0) { break }
-                $outputStream.Write($buffer, 0, $read)
-                $done += $read
-                $pct = if ($total -gt 0) { [Math]::Min(99, [int](($done * 100.0) / $total)) } else { 0 }
-                if ($pct -ne $lastPct) {
-                    $sender.ReportProgress($pct, @{ Done = $done; Total = $total; Version = $job.Version })
-                    $lastPct = $pct
-                }
-            }
-            if ($total -gt 0 -and $done -ne $total) { throw "Загружено $done байт из $total; файл неполный." }
-            if ($done -lt 1000000) { throw "Сервер вернул слишком маленький файл ($done байт)." }
-            $e.Result = @{ Path = $job.Path; Version = $job.Version; Bytes = $done }
-        } catch {
-            if (Test-Path -LiteralPath $job.Path) { Remove-Item -LiteralPath $job.Path -Force -ErrorAction SilentlyContinue }
-            throw
-        } finally {
-            if ($outputStream) { $outputStream.Dispose() }
-            if ($inputStream) { $inputStream.Dispose() }
-            if ($response) { $response.Dispose() }
-        }
-    })
-    $worker.add_ProgressChanged({
-        param($sender, $e)
-        $pbarDownload.Value = [Math]::Max(1, [Math]::Min(99, $e.ProgressPercentage))
-        $script:DownloadProgress = $e.ProgressPercentage
-        $data = $e.UserState
-        if ($data.Total -gt 0) {
-            $lblUpdateInfo.Text = "Загрузка v$($data.Version)... $($e.ProgressPercentage)% ($([Math]::Round($data.Done/1MB, 1)) из $([Math]::Round($data.Total/1MB, 1)) МБ)"
-        } else {
-            $lblUpdateInfo.Text = "Загрузка v$($data.Version)... $([Math]::Round($data.Done/1MB, 1)) МБ"
-        }
-    })
-    $worker.add_RunWorkerCompleted({
-        param($sender, $e)
+    $job = @{ Url = [string]$latest.Url; Path = [string]$tmpFile; Version = [string]$latest.Version }
+    $downloadScript = @'
+param($job, $progress)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$response = $null; $inputStream = $null; $outputStream = $null
+try {
+    $req = [System.Net.HttpWebRequest]::Create($job.Url)
+    $req.UserAgent = "PearlRigControl"
+    $req.AllowAutoRedirect = $true
+    $req.Timeout = 30000
+    $req.ReadWriteTimeout = 30000
+    $response = $req.GetResponse()
+    $total = [long]$response.ContentLength
+    $progress.Total = $total
+    $inputStream = $response.GetResponseStream()
+    $outputStream = [System.IO.File]::Create($job.Path)
+    $buffer = New-Object byte[] 65536
+    [long]$done = 0
+    while ($true) {
+        $read = $inputStream.Read($buffer, 0, $buffer.Length)
+        if ($read -le 0) { break }
+        $outputStream.Write($buffer, 0, $read)
+        $done += $read
+        $progress.Done = $done
+    }
+    if ($total -gt 0 -and $done -ne $total) { throw "Downloaded $done bytes of $total; file is incomplete." }
+    if ($done -lt 1000000) { throw "Server returned an unexpectedly small file ($done bytes)." }
+    return @{ Path = $job.Path; Version = $job.Version; Bytes = $done }
+} catch {
+    if (Test-Path -LiteralPath $job.Path) { Remove-Item -LiteralPath $job.Path -Force -ErrorAction SilentlyContinue }
+    throw
+} finally {
+    if ($outputStream) { $outputStream.Dispose() }
+    if ($inputStream) { $inputStream.Dispose() }
+    if ($response) { $response.Dispose() }
+}
+'@
+    try {
+        $script:UpdateDownloadWork = Start-BackgroundPowerShell -ScriptText $downloadScript -Arguments @($job, $script:DownloadProgressState)
+    } catch {
+        $script:DownloadActive = $false
+        $script:DownloadProgressState = $null
         Stop-FireProgressBar
         $pbarDownload.Visible = $false
-        $script:DownloadActive = $false
         $btnCheckUpdate.Enabled = $true
-        if ($e.Error) {
-            $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
-            $lblUpdateInfo.Text = "Ошибка загрузки v$($script:LatestVersion): $($e.Error.Exception.Message)"
-            Write-AgentLog "ERROR" "Сбой при загрузке обновления: $($e.Error.Exception.Message)"
-            $script:UpdateDownloadWorker.Dispose()
-            $script:UpdateDownloadWorker = $null
-            return
-        }
-        $result = $e.Result
-        $pbarDownload.Value = 100
-        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(52, 211, 153)
-        $lblUpdateInfo.Text = "v$($result.Version) загружена. Установщик готов."
-        Write-AgentLog "OK" "Новая версия v$($result.Version) загружена в $($result.Path), $($result.Bytes) байт."
-        $confirm = [System.Windows.Forms.MessageBox]::Show("Установщик v$($result.Version) загружен.`n`nЗапустить установку сейчас?", "Обновление готово", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-        if ($confirm -eq [System.Windows.Forms.DialogResult]::Yes) { Start-Process -FilePath $result.Path }
-        $script:UpdateDownloadWorker.Dispose()
-        $script:UpdateDownloadWorker = $null
-    })
-    $script:UpdateDownloadWorker = $worker
-    $worker.RunWorkerAsync(@{ Url = $latest.Url; Path = $tmpFile; Version = $latest.Version })
+        $lblUpdateInfo.ForeColor = [System.Drawing.Color]::FromArgb(248, 113, 113)
+        $lblUpdateInfo.Text = "Не удалось запустить загрузку обновления."
+        Write-AgentLog "ERROR" "Не удалось создать пространство загрузки обновления: $($_.Exception.Message)"
+    }
 }
 
 # БЛОК 3: Карточки реальной телеметрии (без выдуманных чисел)
@@ -1782,6 +1826,19 @@ $timer.Interval = 2000
 $tickSec = 0
 
 $timer.Add_Tick({
+    if ($script:UpdateCheckWork -and $script:UpdateCheckWork.Async.IsCompleted) { Complete-UpdateCheck }
+    if ($script:UpdateDownloadWork) {
+        $progress = $script:DownloadProgressState
+        if ($progress -and $progress.Total -gt 0) {
+            $pct = [Math]::Max(1, [Math]::Min(99, [int](($progress.Done * 100.0) / $progress.Total)))
+            $pbarDownload.Value = $pct
+            $script:DownloadProgress = $pct
+            $lblUpdateInfo.Text = "Загрузка v$($progress.Version)... $pct% ($([Math]::Round($progress.Done/1MB, 1)) из $([Math]::Round($progress.Total/1MB, 1)) МБ)"
+        } elseif ($progress) {
+            $lblUpdateInfo.Text = "Загрузка v$($progress.Version)... $([Math]::Round($progress.Done/1MB, 1)) МБ"
+        }
+        if ($script:UpdateDownloadWork.Async.IsCompleted) { Complete-UpdateDownload }
+    }
     Poll-RealTelemetry
     if ($script:ShowPanelEvent -and $script:ShowPanelEvent.WaitOne(0)) { Show-RigPanelFromTray }
 
